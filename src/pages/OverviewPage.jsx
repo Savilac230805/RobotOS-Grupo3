@@ -9,7 +9,8 @@ export const OverviewPage = ({ onNavigate }) => {
   const { role, checkPermission } = useAuth();
 
   const processStateCounts = processes.reduce((acc, p) => {
-    acc[p.state] = (acc[p.state] || 0) + 1;
+    const st = p.state || p.estado;
+    acc[st] = (acc[st] || 0) + 1;
     return acc;
   }, {});
 
@@ -43,14 +44,27 @@ export const OverviewPage = ({ onNavigate }) => {
           <h2 className="text-2xl font-black tracking-tight text-white">Centro de Control</h2>
           <p className="text-xs text-slate-400">
             {isGuest
-              ? 'Vista de Invitado: Monitoreo restringido a Salón y Cocina.'
+              ? 'Vista de Visitante Anónimo: Monitoreo restringido a Salón y Cocina.'
               : 'Telemetría en tiempo real de RobotOS y supervisión del ecosistema doméstico.'}
           </p>
         </div>
 
-        <div className="flex items-center space-x-2 text-xs font-mono text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl self-start sm:self-auto">
-          <span className={`w-2 h-2 rounded-full ${isGuest ? 'bg-amber-400' : 'bg-cyan-400 animate-pulse'}`}></span>
-          <span>{isGuest ? 'PERFIL INVITADO (SALÓN Y COCINA)' : 'SINCRONIZADO CON KERNEL'}</span>
+        {/* Latencias y Estado de Conexión Real */}
+        <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+          <div className="flex items-center space-x-1.5 text-cyan-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl">
+            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+            <span>LATENCIA LOCAL: <strong className="text-white">{metrics.localLatencyMs} ms</strong></span>
+          </div>
+
+          <div className="flex items-center space-x-1.5 text-amber-400/90 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+            <span>REALTIME: <strong className="text-slate-300 uppercase">{metrics.realtimeStatus}</strong></span>
+          </div>
+
+          <div className="flex items-center space-x-2 text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl">
+            <span className={`w-2 h-2 rounded-full ${isGuest ? 'bg-amber-400' : 'bg-cyan-400'}`}></span>
+            <span>{isGuest ? 'PERFIL ANÓNIMO (SOLO LECTURA)' : 'SINCRONIZADO CON KERNEL'}</span>
+          </div>
         </div>
       </div>
 
@@ -59,13 +73,13 @@ export const OverviewPage = ({ onNavigate }) => {
         <div className="p-4 rounded-2xl bg-amber-950/20 border border-amber-500/40 flex items-center space-x-3 text-xs text-amber-200">
           <span className="text-xl">ℹ️</span>
           <div>
-            <strong className="font-semibold text-white">Acceso Limitado a Áreas Comunes (Salón y Cocina):</strong>{' '}
-            Como invitado, solo tienes visibilidad y control sobre luces y climatización de estas dos zonas. Los dispositivos de Entrada, exteriores, telemetría y bitácoras del Kernel requieren rol residente (USER) o administrador (ADMIN).
+            <strong className="font-semibold text-white">Acceso de Visitante Anónimo (Solo Lectura):</strong>{' '}
+            Puedes navegar e inspeccionar el sistema libremente en modo sandbox local. Los periféricos de seguridad (Cerraduras y Cámaras) y la modificación compartida del Kernel requieren autenticación con rol administrador (ADMIN).
           </div>
         </div>
       )}
 
-      {/* Banner de Alerta Crítica Activa (solo visible para ADMIN y USER) */}
+      {/* Banner de Alerta Crítica Activa */}
       {!isGuest && activeAlert && (
         <div className="p-4 rounded-2xl bg-red-950/40 border border-red-500/50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-lg shadow-red-950/20">
           <div className="flex items-center space-x-3">
@@ -84,14 +98,14 @@ export const OverviewPage = ({ onNavigate }) => {
           </div>
           <button
             onClick={() => handleNavigateWithAuth('logs-alerts', 'USER', 'Acceso a Centro de Alertas')}
-            className="text-xs font-semibold bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-lg transition-colors shrink-0"
+            className="text-xs font-semibold bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-lg transition-colors shrink-0 cursor-pointer"
           >
             Ver en Centro de Alertas →
           </button>
         </div>
       )}
 
-      {/* MÉTRICAS DE HARDWARE Y GRÁFICAS (OCULTAS PARA GUEST) */}
+      {/* MÉTRICAS DE HARDWARE Y GRÁFICAS */}
       {!isGuest && (
         <>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -169,12 +183,12 @@ export const OverviewPage = ({ onNavigate }) => {
                 {isGuest ? 'Dispositivos de Áreas Comunes (Salón y Cocina)' : 'Estado de Dispositivos IoT'}
               </h3>
               <p className="text-xs text-slate-400">
-                {isGuest ? 'Controles accesibles para invitados' : 'Lectura en tiempo real del ecosistema del hogar'}
+                {isGuest ? 'Controles accesibles para visitantes anónimos' : 'Lectura en tiempo real del ecosistema del hogar'}
               </p>
             </div>
             <button
               onClick={() => onNavigate('devices')}
-              className="text-xs font-semibold text-cyan-400 hover:text-cyan-300 transition-colors"
+              className="text-xs font-semibold text-cyan-400 hover:text-cyan-300 transition-colors cursor-pointer"
             >
               Ver Todos →
             </button>
@@ -195,7 +209,7 @@ export const OverviewPage = ({ onNavigate }) => {
 
                 <button
                   onClick={() => handleDeviceClick(dev)}
-                  className={`text-xs font-mono font-bold px-3 py-1 rounded-lg border transition-all ${
+                  className={`text-xs font-mono font-bold px-3 py-1 rounded-lg border transition-all cursor-pointer ${
                     dev.status === 'ON' || dev.status === 'BLOQUEADA' || dev.status === 'ONLINE'
                       ? 'bg-emerald-950 text-emerald-400 border-emerald-800/80 shadow-sm'
                       : dev.status === 'DETECTADO'
@@ -215,7 +229,7 @@ export const OverviewPage = ({ onNavigate }) => {
           </div>
         </div>
 
-        {/* PANELES DE PROCESOS Y LOGS (SOLO PARA ADMIN Y USER) */}
+        {/* PANELES DE PROCESOS Y LOGS */}
         {!isGuest && (
           <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 shadow-lg space-y-4">
             <div className="flex items-center justify-between">
@@ -225,7 +239,7 @@ export const OverviewPage = ({ onNavigate }) => {
               </div>
               <button
                 onClick={() => handleNavigateWithAuth('processes', 'USER', 'Acceso a Procesos & Scheduler')}
-                className="text-xs font-semibold text-cyan-400 hover:text-cyan-300 transition-colors"
+                className="text-xs font-semibold text-cyan-400 hover:text-cyan-300 transition-colors cursor-pointer"
               >
                 Ver Scheduler →
               </button>
@@ -255,58 +269,62 @@ export const OverviewPage = ({ onNavigate }) => {
               </div>
             </div>
 
-            {/* Lista de procesos con PID, Nombre, PRIORIDAD destacada, CPU y Estado */}
+            {/* Lista de procesos */}
             <div className="space-y-2 pt-2">
-              {processes.slice(0, 4).map((proc) => (
-                <div
-                  key={proc.id}
-                  className="flex flex-col sm:flex-row sm:items-center justify-between p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80 gap-2 text-xs"
-                >
-                  <div className="flex items-center space-x-2.5">
-                    <span className="font-mono text-slate-500 font-semibold">PID {proc.pid}</span>
-                    <span className="font-medium text-slate-200">{proc.name}</span>
+              {processes.slice(0, 4).map((proc) => {
+                const nombre = proc.name || proc.nombre;
+                const estado = proc.state || proc.estado;
+                return (
+                  <div
+                    key={proc.id}
+                    className="flex flex-col sm:flex-row sm:items-center justify-between p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80 gap-2 text-xs"
+                  >
+                    <div className="flex items-center space-x-2.5">
+                      <span className="font-mono text-slate-500 font-semibold">PID {proc.pid}</span>
+                      <span className="font-medium text-slate-200">{nombre}</span>
+                    </div>
+
+                    <div className="flex items-center space-x-2 self-end sm:self-auto">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider ${
+                          proc.priority === 'Crítica' || proc.prioridad === 1
+                            ? 'bg-red-950 text-red-400 border border-red-800/90 shadow-sm shadow-red-950 animate-pulse'
+                            : proc.priority === 'Alta' || proc.prioridad === 2
+                            ? 'bg-amber-950 text-amber-400 border border-amber-800/60'
+                            : proc.priority === 'Media' || proc.prioridad === 3
+                            ? 'bg-blue-950/80 text-blue-400 border border-blue-800/60'
+                            : 'bg-slate-800 text-slate-400 border border-slate-700'
+                        }`}
+                      >
+                        Prioridad: {proc.priority || (proc.prioridad === 1 ? 'Crítica' : 'Normal')}
+                      </span>
+
+                      <span className="text-[11px] font-mono text-slate-400">{proc.cpu || proc.cpuRequerida}% CPU</span>
+
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                          estado === 'RUNNING'
+                            ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/60 animate-pulse'
+                            : estado === 'WAITING'
+                            ? 'bg-orange-950 text-orange-400 border border-orange-800/60'
+                            : estado === 'READY'
+                            ? 'bg-yellow-950 text-yellow-400 border border-yellow-800/60'
+                            : 'bg-slate-800 text-slate-300'
+                        }`}
+                      >
+                        {estado}
+                      </span>
+                    </div>
                   </div>
-
-                  <div className="flex items-center space-x-2 self-end sm:self-auto">
-                    {/* Badge de Prioridad para ver cuando surveillance_proc sube a Crítica */}
-                    <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider ${
-                        proc.priority === 'Crítica'
-                          ? 'bg-red-950 text-red-400 border border-red-800/90 shadow-sm shadow-red-950 animate-pulse'
-                          : proc.priority === 'Alta'
-                          ? 'bg-amber-950 text-amber-400 border border-amber-800/60'
-                          : proc.priority === 'Media'
-                          ? 'bg-blue-950/80 text-blue-400 border border-blue-800/60'
-                          : 'bg-slate-800 text-slate-400 border border-slate-700'
-                      }`}
-                    >
-                      Prioridad: {proc.priority}
-                    </span>
-
-                    <span className="text-[11px] font-mono text-slate-400">{proc.cpu}% CPU</span>
-
-                    {/* Badge de Estado */}
-                    <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                        proc.state === 'RUNNING'
-                          ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/60'
-                          : proc.state === 'WAITING'
-                          ? 'bg-orange-950 text-orange-400 border border-orange-800/60'
-                          : proc.state === 'READY'
-                          ? 'bg-yellow-950 text-yellow-400 border border-yellow-800/60'
-                          : 'bg-slate-800 text-slate-300'
-                      }`}
-                    >
-                      {proc.state}
-                    </span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
-            {/* Últimos registros de bitácora SIN CORTES (texto completo multilínea) */}
+            {/* Últimos registros de bitácora */}
             <div className="pt-2 border-t border-slate-800/60">
-              <div className="text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-2">Últimos Logs del Sistema</div>
+              <div className="text-[11px] font-mono text-slate-400 uppercase tracking-wider mb-2">
+                Últimos Logs del Sistema
+              </div>
               <div className="space-y-2 font-mono text-xs">
                 {logs.slice(0, 3).map((log) => (
                   <div key={log.id} className="p-2 rounded-lg bg-slate-950/70 border border-slate-800/60 leading-relaxed break-words">

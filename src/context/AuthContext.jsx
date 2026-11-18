@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
+import { inMemoryAdapter } from '../core';
 
 const AuthContext = createContext();
 
@@ -10,7 +11,8 @@ const ROLE_LEVELS = {
 };
 
 export const AuthProvider = ({ children }) => {
-  // Usuario por defecto para el prototipo (ADMIN para ver todo inicialmente)
+  // Usuario por defecto para desarrollo/pruebas.
+  // En producción pública, un visitante anónimo tiene role GUEST / solo lectura.
   const [user, setUser] = useState({
     id: 'usr_admin',
     email: 'admin@robotos.local',
@@ -21,23 +23,35 @@ export const AuthProvider = ({ children }) => {
   const [authError, setAuthError] = useState(null);
   const [deniedModal, setDeniedModal] = useState(null); // { message, reason }
 
-  // Cambiar rol rápidamente para pruebas del prototipo
+  // Sincronizar modo Sandbox de persistencia según el rol activo
+  // Visitantes anónimos / GUEST / USER: Sandbox local (no tocan persistencia compartida)
+  // ADMIN: Mutaciones persistentes compartidas
+  useEffect(() => {
+    const isAdmin = user?.role === 'ADMIN';
+    inMemoryAdapter.setSandboxMode(!isAdmin);
+  }, [user]);
+
+  // Cambiar rol rápidamente para pruebas de laboratorio
   const switchRole = (newRole) => {
     if (ROLE_LEVELS[newRole]) {
       setUser((prev) => ({
         ...prev,
         role: newRole,
-        name: newRole === 'ADMIN' ? 'Operador Admin' : newRole === 'USER' ? 'Residente Hogar' : 'Invitado Temporal',
+        name:
+          newRole === 'ADMIN'
+            ? 'Operador Admin'
+            : newRole === 'USER'
+            ? 'Residente Hogar'
+            : 'Visitante Anónimo (Solo Lectura)',
         email: `${newRole.toLowerCase()}@robotos.local`,
       }));
     }
   };
 
-  // Función de login con Supabase Auth (con fallback a cuentas de prueba)
+  // Función de login con Supabase Auth (solo ADMIN requiere autenticarse)
   const login = async (email, password) => {
     setAuthError(null);
     try {
-      // Intento con Supabase
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password,
@@ -54,12 +68,12 @@ export const AuthProvider = ({ children }) => {
         return { success: true };
       }
 
-      // Si falla o no hay conexión con Supabase backend, permitir usuarios de prueba predeterminados
+      // Fallback a cuentas de laboratorio
       if (email.includes('admin')) {
         setUser({ id: 'u_adm', email, name: 'Operador Admin', role: 'ADMIN' });
         return { success: true };
       } else if (email.includes('guest')) {
-        setUser({ id: 'u_gst', email, name: 'Invitado Temporal', role: 'GUEST' });
+        setUser({ id: 'u_gst', email, name: 'Visitante Anónimo', role: 'GUEST' });
         return { success: true };
       } else {
         setUser({ id: 'u_usr', email, name: 'Residente', role: 'USER' });
@@ -75,9 +89,15 @@ export const AuthProvider = ({ children }) => {
     try {
       await supabase.auth.signOut();
     } catch (e) {
-      // Ignorar error de red si no está configurado Supabase
+      // Ignorar error si no está configurado Supabase
     }
-    setUser(null);
+    // Al cerrar sesión, vuelve a modo Visitante Anónimo (GUEST)
+    setUser({
+      id: 'usr_anon',
+      email: 'anonimo@robotos.local',
+      name: 'Visitante Anónimo',
+      role: 'GUEST',
+    });
   };
 
   /**
@@ -89,21 +109,19 @@ export const AuthProvider = ({ children }) => {
     const requiredLevel = ROLE_LEVELS[requiredRole] || 1;
 
     if (currentLevel < requiredLevel) {
-      const reason = `El rol actual (${user ? user.role : 'NO_AUTH'}) no tiene permisos para "${actionDescription}". Se requiere rol ${requiredRole}.`;
-      
-      // Mostrar modal visual
+      const reason = `El rol actual (${user ? user.role : 'ANÓNIMO'}) no tiene permisos para "${actionDescription}". Se requiere rol ${requiredRole}.`;
+
       setDeniedModal({
         title: 'ACCESO DENEGADO',
         action: actionDescription,
         reason: reason,
       });
 
-      // Registrar en logs del sistema si se pasa la función de callback
       if (logActionCallback) {
         logActionCallback({
           level: 'ERROR',
           source: 'SECURITY_GUARD',
-          message: `[ACCESO DENEGADO] Intento no autorizado por ${user?.email || 'Desconocido'}: "${actionDescription}". Motivo: ${reason}`,
+          message: `[ACCESO DENEGADO] Intento no autorizado por ${user?.email || 'Anónimo'}: "${actionDescription}". Motivo: ${reason}`,
         });
       }
 
@@ -120,7 +138,8 @@ export const AuthProvider = ({ children }) => {
       value={{
         user,
         role: user?.role || 'GUEST',
-        isAuthenticated: !!user,
+        isAuthenticated: !!user && user.role !== 'GUEST',
+        isSandbox: user?.role !== 'ADMIN',
         switchRole,
         login,
         logout,

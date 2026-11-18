@@ -1,0 +1,506 @@
+// test/core.test.js
+// Suite integral de pruebas unitarias para RobotOS Core
+// Cubre: Proceso, CPU, Scheduler, MemoryManager, BootManager, EventEngine, Syscalls e IPersistenceAdapter
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  Proceso,
+  ESTADOS,
+  reiniciarContadorPid,
+  simular,
+  dibujarLinea,
+  ALGORITMOS,
+  MemoryManager,
+  TOTAL_BLOCKS,
+  KERNEL_BLOCKS_COUNT,
+  BootManager,
+  BOOT_STAGES,
+  EventEngine,
+  EVENT_SOURCES,
+  EVENT_SEVERITY,
+  SystemCalls,
+  InMemoryPersistenceAdapter,
+  SYNC_STATUS,
+} from '../src/core/index.js';
+
+function crear(nombre, prioridad, tiempoTotal, cpuRequerida = 10) {
+  return new Proceso({ nombre, prioridad, memoriaRequerida: 10, cpuRequerida, tiempoTotal });
+}
+
+function metricaDe(resultado, nombre) {
+  return resultado.metricas.find((m) => m.nombre === nombre);
+}
+
+const datosBase = {
+  nombre: 'Control de iluminación',
+  prioridad: 3,
+  memoriaRequerida: 64,
+  cpuRequerida: 10,
+  tiempoTotal: 3,
+};
+
+// ==========================================
+// 1. CLASE PROCESO (8 Tests)
+// ==========================================
+test('Proceso: un proceso nuevo empieza en NEW con pid 1 y tiempo restante completo', () => {
+  reiniciarContadorPid();
+  const p = new Proceso(datosBase);
+  assert.equal(p.estado, ESTADOS.NEW);
+  assert.equal(p.pid, 1);
+  assert.equal(p.tiempoRestante, 3);
+});
+
+test('Proceso: cada proceso nuevo recibe un pid distinto y creciente', () => {
+  reiniciarContadorPid();
+  const a = new Proceso(datosBase);
+  const b = new Proceso(datosBase);
+  assert.equal(a.pid, 1);
+  assert.equal(b.pid, 2);
+});
+
+test('Proceso: rechaza datos inválidos al crear un proceso', () => {
+  assert.throws(() => new Proceso({ ...datosBase, nombre: '' }), /nombre/i);
+  assert.throws(() => new Proceso({ ...datosBase, prioridad: 0 }), /prioridad/i);
+  assert.throws(() => new Proceso({ ...datosBase, memoriaRequerida: -1 }), /memoria/i);
+  assert.throws(() => new Proceso({ ...datosBase, cpuRequerida: 150 }), /CPU/);
+  assert.throws(() => new Proceso({ ...datosBase, tiempoTotal: 1.5 }), /entero/);
+});
+
+test('Proceso: ciclo de vida completo: NEW, READY, RUNNING, WAITING, READY, RUNNING, TERMINATED', () => {
+  const p = new Proceso(datosBase);
+  p.admitir();
+  assert.equal(p.estado, ESTADOS.READY);
+  p.ejecutar();
+  assert.equal(p.estado, ESTADOS.RUNNING);
+  p.pausar();
+  assert.equal(p.estado, ESTADOS.WAITING);
+  p.reanudar();
+  assert.equal(p.estado, ESTADOS.READY);
+  p.ejecutar();
+  p.finalizar();
+  assert.equal(p.estado, ESTADOS.TERMINATED);
+});
+
+test('Proceso: un proceso READY también puede pausarse', () => {
+  const p = new Proceso(datosBase);
+  p.admitir();
+  p.pausar();
+  assert.equal(p.estado, ESTADOS.WAITING);
+});
+
+test('Proceso: una transición inválida lanza error y no cambia el estado', () => {
+  const p = new Proceso(datosBase);
+  assert.throws(() => p.ejecutar(), /Transición no permitida/);
+  assert.equal(p.estado, ESTADOS.NEW);
+  assert.throws(() => p.pausar(), /Transición no permitida/);
+  assert.equal(p.estado, ESTADOS.NEW);
+});
+
+test('Proceso: un proceso TERMINATED no puede volver a ningún estado', () => {
+  const p = new Proceso(datosBase);
+  p.finalizar();
+  assert.equal(p.estado, ESTADOS.TERMINATED);
+  assert.throws(() => p.admitir(), /Transición no permitida/);
+  assert.throws(() => p.ejecutar(), /Transición no permitida/);
+  assert.throws(() => p.finalizar(), /Transición no permitida/);
+});
+
+test('Proceso: serializa a JSON correctamente para persistencia y telemetría', () => {
+  reiniciarContadorPid();
+  const p = new Proceso(datosBase);
+  const json = p.toJSON();
+  assert.equal(json.pid, 1);
+  assert.equal(json.nombre, 'Control de iluminación');
+  assert.equal(json.estado, 'NEW');
+  assert.equal(json.memoryBlocks, 4);
+});
+
+// ==========================================
+// 2. CPU Y SCHEDULER (9 Tests)
+// ==========================================
+test('Scheduler: PRIORIDAD ejecuta primero el proceso con número de prioridad más bajo', () => {
+  reiniciarContadorPid();
+  const a = crear('A', 3, 2);
+  const b = crear('B', 1, 2);
+  const c = crear('C', 2, 1);
+  const r = simular([a, b, c], { algoritmo: ALGORITMOS.PRIORIDAD });
+  assert.deepEqual(
+    r.linea.map((t) => t.nombre),
+    ['B', 'B', 'C', 'A', 'A']
+  );
+});
+
+test('Scheduler: PRIORIDAD en caso de empate gana el que se creó primero', () => {
+  reiniciarContadorPid();
+  const a = crear('A', 2, 1);
+  const b = crear('B', 2, 1);
+  const r = simular([b, a], { algoritmo: ALGORITMOS.PRIORIDAD });
+  assert.deepEqual(
+    r.linea.map((t) => t.nombre),
+    ['A', 'B']
+  );
+});
+
+test('Scheduler: PRIORIDAD calcula correctamente los tiempos de espera', () => {
+  reiniciarContadorPid();
+  const r = simular([crear('A', 3, 2), crear('B', 1, 2), crear('C', 2, 1)], {
+    algoritmo: ALGORITMOS.PRIORIDAD,
+  });
+  assert.equal(metricaDe(r, 'B').espera, 0);
+  assert.equal(metricaDe(r, 'C').espera, 2);
+  assert.equal(metricaDe(r, 'A').espera, 3);
+});
+
+test('Scheduler: ROUND ROBIN alterna los procesos según el quantum', () => {
+  reiniciarContadorPid();
+  const r = simular([crear('A', 1, 3), crear('B', 1, 2)], {
+    algoritmo: ALGORITMOS.ROUND_ROBIN,
+    quantum: 2,
+  });
+  assert.deepEqual(
+    r.linea.map((t) => t.nombre),
+    ['A', 'A', 'B', 'B', 'A']
+  );
+  assert.equal(metricaDe(r, 'A').espera, 2);
+  assert.equal(metricaDe(r, 'B').espera, 2);
+});
+
+test('Scheduler: ROUND ROBIN rechaza un quantum inválido', () => {
+  const p = crear('A', 1, 2);
+  assert.throws(
+    () => simular([p], { algoritmo: ALGORITMOS.ROUND_ROBIN, quantum: 0 }),
+    /quantum/
+  );
+});
+
+test('CPU: al terminar la simulación todos los procesos quedan TERMINATED sin tiempo restante', () => {
+  const procesos = [crear('A', 1, 3), crear('B', 2, 2)];
+  simular(procesos, { algoritmo: ALGORITMOS.ROUND_ROBIN, quantum: 1 });
+  for (const p of procesos) {
+    assert.equal(p.estado, ESTADOS.TERMINATED);
+    assert.equal(p.tiempoRestante, 0);
+  }
+});
+
+test('CPU: un proceso pausado (WAITING) no entra al planificador y se informa como omitido', () => {
+  reiniciarContadorPid();
+  const a = crear('A', 1, 2);
+  const b = crear('B', 2, 2);
+  b.admitir();
+  b.pausar();
+  const r = simular([a, b], { algoritmo: ALGORITMOS.PRIORIDAD });
+  assert.deepEqual(
+    r.linea.map((t) => t.nombre),
+    ['A', 'A']
+  );
+  assert.equal(r.omitidos.length, 1);
+  assert.equal(r.omitidos[0].nombre, 'B');
+  assert.equal(b.estado, ESTADOS.WAITING);
+});
+
+test('CPU: el uso de CPU promedio se calcula con la CPU requerida de cada tick', () => {
+  const r = simular([crear('A', 1, 2, 40), crear('B', 2, 2, 20)], {
+    algoritmo: ALGORITMOS.PRIORIDAD,
+  });
+  assert.equal(r.usoCpuPromedio, 30);
+  assert.equal(r.duracionTotal, 4);
+});
+
+test('CPU: dibujarLinea muestra una fila por proceso', () => {
+  const r = simular([crear('A', 1, 2), crear('B', 2, 1)], { algoritmo: ALGORITMOS.PRIORIDAD });
+  const dibujo = dibujarLinea(r.linea);
+  assert.equal(dibujo, 'A | ██·\nB | ··█');
+});
+
+// ==========================================
+// 3. MEMORY MANAGER (5 Tests)
+// ==========================================
+test('MemoryManager: inicializa 64 bloques de 16MB con 8 bloques reservados para Kernel', () => {
+  const mem = new MemoryManager();
+  const blocks = mem.getBlocks();
+  assert.equal(blocks.length, TOTAL_BLOCKS);
+  assert.equal(mem.getKernelBlocksCount(), KERNEL_BLOCKS_COUNT);
+  assert.equal(mem.getFreeBlocksCount(), 56);
+  assert.equal(blocks[0].state, 'KERNEL');
+  assert.equal(blocks[7].state, 'KERNEL');
+  assert.equal(blocks[8].state, 'FREE');
+});
+
+test('MemoryManager: rechaza asignación si se solicitan más bloques que los disponibles', () => {
+  const mem = new MemoryManager();
+  assert.equal(mem.canAllocate(60), false);
+  assert.throws(() => mem.allocate('proceso_pesado', 60), /Memoria insuficiente/);
+});
+
+test('MemoryManager: asigna bloques contiguos y actualiza métricas de memoria libre', () => {
+  const mem = new MemoryManager();
+  const res = mem.allocate('lighting_daemon', 4, '#10B981');
+  assert.equal(res.success, true);
+  assert.equal(res.allocatedBlocks, 4);
+  assert.equal(res.allocatedMB, 64);
+  assert.equal(mem.getFreeBlocksCount(), 52);
+  const allocated = mem.getBlocks().filter((b) => b.processName === 'lighting_daemon');
+  assert.equal(allocated.length, 4);
+  assert.equal(allocated[0].state, 'ALLOCATED');
+});
+
+test('MemoryManager: libera todos los bloques de un proceso al finalizar', () => {
+  const mem = new MemoryManager();
+  mem.allocate('proc_temporal', 6);
+  assert.equal(mem.getFreeBlocksCount(), 50);
+  const freed = mem.freeProcessMemory('proc_temporal');
+  assert.equal(freed, 6);
+  assert.equal(mem.getFreeBlocksCount(), 56);
+});
+
+test('MemoryManager: protege bloques de Kernel y valida rol ADMIN para liberación manual', () => {
+  const mem = new MemoryManager();
+  // Rechaza liberar bloque de Kernel incluso con ADMIN
+  assert.throws(() => mem.freeBlock(0, 'ADMIN'), /espacio protegido del Kernel/);
+  // Rechaza sin rol ADMIN
+  assert.throws(() => mem.freeBlock(10, 'GUEST'), /requiere rol ADMIN/);
+  // Permite con ADMIN en bloque no-kernel
+  mem.allocate('test_proc', 2);
+  const res = mem.freeBlock(8, 'ADMIN');
+  assert.equal(res.success, true);
+});
+
+// ==========================================
+// 4. BOOT MANAGER (3 Tests)
+// ==========================================
+test('BootManager: arranque exitoso ejecuta las 8 etapas completas en orden', async () => {
+  const boot = new BootManager();
+  const res = await boot.executeBoot();
+  assert.equal(res.success, true);
+  assert.equal(res.safeMode, false);
+  assert.equal(res.bootLog.length, 8);
+  assert.equal(res.bootLog[0].id, 'POWER_ON');
+  assert.equal(res.bootLog[7].id, 'SYSTEM_READY');
+  for (const stage of res.bootLog) {
+    assert.equal(stage.status, 'COMPLETED');
+    assert.ok(stage.timestamp);
+    assert.ok(stage.result);
+  }
+});
+
+test('BootManager: simulación de fallo en una etapa activa Safe Mode y aborta etapas siguientes', async () => {
+  const boot = new BootManager();
+  // Forzar fallo en etapa 4: KERNEL_INIT
+  const res = await boot.executeBoot({ failAtStage: 4 });
+  assert.equal(res.success, false);
+  assert.equal(res.safeMode, true);
+  assert.equal(res.bootLog.length, 4);
+  const failedStage = res.bootLog[3];
+  assert.equal(failedStage.id, 'KERNEL_INIT');
+  assert.equal(failedStage.status, 'FAILED');
+  assert.ok(failedStage.error.includes('etapa 4'));
+});
+
+test('BootManager: recupera log de arranque y confirma estado de sistema', async () => {
+  const boot = new BootManager();
+  await boot.executeBoot();
+  assert.equal(boot.isSystemReady(), true);
+  assert.equal(boot.getBootLog().length, 8);
+});
+
+// ==========================================
+// 5. EVENT ENGINE (3 Tests)
+// ==========================================
+test('EventEngine: emite evento respetando el esquema JSON fijo exigido', () => {
+  const engine = new EventEngine();
+  const event = engine.emit({
+    type: 'DEVICE_STATE_CHANGED',
+    source: EVENT_SOURCES.IOT_MANAGER,
+    severity: EVENT_SEVERITY.INFO,
+    pid: 101,
+    payload: { deviceId: 'd1', status: 'ON' },
+  });
+
+  assert.ok(event.id.startsWith('evt_'));
+  assert.ok(event.timestamp);
+  assert.equal(event.source, 'IOT_MANAGER');
+  assert.equal(event.type, 'DEVICE_STATE_CHANGED');
+  assert.equal(event.severity, 'INFO');
+  assert.equal(event.pid, 101);
+  assert.equal(event.payload.deviceId, 'd1');
+  assert.equal(event.payload.status, 'ON');
+});
+
+test('EventEngine: rechaza eventos sin tipo o con tipo no string', () => {
+  const engine = new EventEngine();
+  assert.throws(() => engine.emit({ source: 'KERNEL' }), /tipo de evento/);
+  assert.throws(() => engine.emit({ type: 12345 }), /tipo de evento/);
+});
+
+test('EventEngine: notifica suscriptores específicos y globales correctamente', () => {
+  const engine = new EventEngine();
+  let specificCalled = false;
+  let globalCalled = false;
+
+  engine.subscribe('TEST_EVENT', (e) => {
+    specificCalled = true;
+  });
+  engine.subscribeAll((e) => {
+    globalCalled = true;
+  });
+
+  engine.emit({ type: 'TEST_EVENT', payload: { ok: true } });
+  assert.equal(specificCalled, true);
+  assert.equal(globalCalled, true);
+});
+
+// ==========================================
+// 6. SYSTEM CALLS CON VALIDACIÓN DE ROL ADMIN (5 Tests)
+// ==========================================
+test('Syscalls: sys_create_process rechaza solicitudes sin rol ADMIN o parámetros vacíos', () => {
+  const sys = new SystemCalls();
+  // Sin rol ADMIN
+  assert.throws(
+    () => sys.createProcess({ name: 'mi_proceso' }, { role: 'USER' }),
+    /requiere rol ADMIN/
+  );
+  // Con ADMIN pero nombre vacío
+  assert.throws(
+    () => sys.createProcess({ name: '' }, { role: 'ADMIN' }),
+    /no puede estar vacío/
+  );
+});
+
+test('Syscalls: sys_create_process ejecuta con ADMIN, valida memoria y emite evento', () => {
+  const sys = new SystemCalls();
+  const res = sys.createProcess(
+    { name: 'proc_autorizado', priority: 'Alta', memoryBlocksCount: 2, cpu: 15 },
+    { role: 'ADMIN', user: { email: 'admin@robotos.local' } }
+  );
+  assert.equal(res.success, true);
+  assert.equal(res.process.nombre, 'proc_autorizado');
+  assert.equal(res.process.estado, 'NEW');
+  assert.equal(res.memory.allocatedBlocks, 2);
+});
+
+test('Syscalls: sys_terminate_process protege procesos de sistema y valida rol ADMIN', () => {
+  const sys = new SystemCalls();
+  const procSistema = new Proceso({ ...datosBase, nombre: 'kernel_guard', isSystem: true });
+  const procUsuario = new Proceso({ ...datosBase, nombre: 'user_app', isSystem: false });
+
+  // USER intenta matar proceso del sistema -> Rechazado
+  assert.throws(
+    () => sys.terminateProcess(procSistema.id, { role: 'USER' }, [procSistema]),
+    /proceso crítico del sistema sin rol ADMIN/
+  );
+
+  // USER intenta matar proceso de usuario -> Rechazado
+  assert.throws(
+    () => sys.terminateProcess(procUsuario.id, { role: 'USER' }, [procUsuario]),
+    /requiere rol ADMIN/
+  );
+
+  // ADMIN finaliza proceso -> Exitoso
+  const res = sys.terminateProcess(procUsuario.id, { role: 'ADMIN' }, [procUsuario]);
+  assert.equal(res.success, true);
+  assert.equal(procUsuario.estado, 'TERMINATED');
+});
+
+test('Syscalls: VFS readFile y writeFile validan rutas y protegen /system', () => {
+  const sys = new SystemCalls();
+  const vfs = {
+    '/system': [{ name: 'kernel.sys', size: '2 MB' }],
+    '/apps': [{ name: 'notes.app', size: '10 KB' }],
+  };
+
+  // Ruta inválida
+  assert.throws(() => sys.readFile('invalido', vfs), /Ruta inválida/);
+  // Archivo inexistente
+  assert.throws(() => sys.readFile('/apps/inexistente.txt', vfs), /no encontrado/);
+  // Lectura correcta
+  const readRes = sys.readFile('/apps/notes.app', vfs);
+  assert.equal(readRes.success, true);
+
+  // Escritura en /system por usuario no-ADMIN -> Denegada
+  assert.throws(
+    () => sys.writeFile('/system/hack.sys', 'malware', vfs, {}, { role: 'USER' }),
+    /solo el rol ADMIN/
+  );
+  // Escritura en /apps con ADMIN -> Permitida
+  const writeRes = sys.writeFile('/apps/nueva.app', 'código', vfs, {}, { role: 'ADMIN' });
+  assert.equal(writeRes.success, true);
+});
+
+test('Syscalls: deviceWrite restringe actuadores de seguridad a visitantes GUEST', () => {
+  const sys = new SystemCalls();
+  const cerradura = { id: 'd5', name: 'Cerradura Principal', type: 'lock', status: 'BLOQUEADA' };
+  const luz = { id: 'd1', name: 'Luz Salón', type: 'light', status: 'OFF' };
+
+  // GUEST intenta abrir cerradura -> Denegado
+  assert.throws(
+    () => sys.deviceWrite('d5', 'DESBLOQUEADA', [cerradura], { role: 'GUEST' }),
+    /restringido para visitantes anónimos/
+  );
+
+  // GUEST conmuta luz -> Permitido
+  const resLuz = sys.deviceWrite('d1', 'ON', [luz], { role: 'GUEST' });
+  assert.equal(resLuz.status, 'ON');
+});
+
+// ==========================================
+// 7. PERSISTENCE ADAPTER (3 Tests)
+// ==========================================
+test('PersistenceAdapter: modo Sandbox aísla mutaciones de visitantes anónimos sin alterar almacenamiento compartido', async () => {
+  const adapter = new InMemoryPersistenceAdapter();
+  // Modo Sandbox activo (visitante anónimo)
+  adapter.setSandboxMode(true);
+  assert.equal(adapter.isSandboxMode(), true);
+
+  await adapter.saveEvent({ id: 'evt_sandbox_1', type: 'LOCAL_ACTION' });
+  const sandboxHistory = await adapter.loadHistory();
+  assert.equal(sandboxHistory.length, 1);
+
+  // Cambiar a modo ADMIN (compartido)
+  adapter.setSandboxMode(false);
+  assert.equal(adapter.isSandboxMode(), false);
+  const sharedHistory = await adapter.loadHistory();
+  // El almacenamiento compartido debe estar limpio (no contaminado por el visitante anónimo)
+  assert.equal(sharedHistory.length, 0);
+});
+
+test('PersistenceAdapter: modo ADMIN persiste en almacenamiento compartido', async () => {
+  const adapter = new InMemoryPersistenceAdapter();
+  adapter.setSandboxMode(false);
+
+  await adapter.saveEvent({ id: 'evt_admin_1', type: 'ADMIN_CONFIG' });
+  const history = await adapter.loadHistory();
+  assert.equal(history.length, 1);
+  assert.equal(history[0].type, 'ADMIN_CONFIG');
+});
+
+test('PersistenceAdapter: cola de reintentos procesa operaciones fallidas y actualiza estado de sincronización', async () => {
+  const adapter = new InMemoryPersistenceAdapter();
+  assert.equal(adapter.getSyncStatus(), SYNC_STATUS.IDLE);
+
+  let intentos = 0;
+  // Operación que falla la primera vez y pasa en el reintento
+  const operacionResiliente = async () => {
+    intentos += 1;
+    if (intentos === 1) {
+      throw new Error('Fallo de red transitorio');
+    }
+    return true;
+  };
+
+  adapter.enqueueRetry(operacionResiliente);
+  assert.equal(adapter.retryQueue.length, 1);
+
+  // Primer pase: falla y se reprograma
+  const resPase1 = await adapter.processRetryQueue();
+  assert.equal(resPase1.processed, 0);
+  assert.equal(resPase1.remaining, 1);
+  assert.equal(adapter.getSyncStatus(), SYNC_STATUS.ERROR);
+
+  // Segundo pase: tiene éxito y limpia la cola
+  const resPase2 = await adapter.processRetryQueue();
+  assert.equal(resPase2.processed, 1);
+  assert.equal(resPase2.remaining, 0);
+  assert.equal(adapter.getSyncStatus(), SYNC_STATUS.IDLE);
+});
