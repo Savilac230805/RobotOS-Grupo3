@@ -2,18 +2,18 @@
 // Capa de System Calls (Syscalls) formales de RobotOS SmartHouse
 // Separa las solicitudes de usuario/aplicación del espacio de Kernel.
 //
-// CORRECCIÓN ARQUITECTÓNICA DE ROLES:
-// - Los syscalls de procesos y memoria (createProcess, terminateProcess, allocateMemory, freeMemory)
-//   operan libremente para visitantes anónimos sobre su estado local de sandbox sin exigir rol ADMIN.
-// - Solo la escritura al almacenamiento compartido/persistido (adaptador remoto) exige rol ADMIN.
-// - Se mantienen las restricciones críticas de seguridad sobre /system y procesos del sistema (isSystem).
-// - La seguridad real de la escritura compartida la impone PostgreSQL Row Level Security (RLS) en Supabase,
+// REGLAS DE ROLES:
+// - Los syscalls de procesos y memoria operan para visitantes sobre su estado local de sandbox.
+// - Solo la escritura al almacenamiento compartido/persistido exige rol ADMIN.
+// - Se mantienen las restricciones críticas: /system, procesos del sistema (isSystem)
+//   y bloques de Kernel (0 a 7, protegidos en MemoryManager).
+// - La seguridad real de la escritura compartida la impone PostgreSQL RLS en Supabase,
 //   no las comprobaciones del cliente.
 
 import { eventEngine, EVENT_SOURCES, EVENT_SEVERITY } from './eventEngine.js';
 import { inMemoryAdapter } from './persistence/InMemoryPersistenceAdapter.js';
 import { memoryManager } from './memoryManager.js';
-import { Proceso } from './proceso.js';
+import { Proceso, ESTADOS } from './proceso.js';
 
 export class SystemCalls {
   constructor(events = eventEngine, persistence = inMemoryAdapter, memory = memoryManager) {
@@ -40,11 +40,23 @@ export class SystemCalls {
 
   /**
    * Syscall: sys_create_process
-   * Permite a cualquier usuario (incluidos visitantes anónimos) crear procesos en su sandbox local.
-   * Valida memoria disponible y reserva bloques a través de MemoryManager.
+   * Cualquier usuario (incluidos visitantes) puede crear procesos en su sandbox local.
+   * - Valida memoria disponible y reserva bloques a través de MemoryManager.
+   * - Si la creación del PCB falla, los bloques reservados se devuelven (sin fugas).
+   * - Si se recibe existingProcesses, rechaza nombres duplicados de procesos vivos
+   *   (la memoria se asigna por nombre, así que dos procesos con el mismo nombre
+   *   compartirían bloques al terminar).
    */
   createProcess(
-    { name, priority = 'Media', memoryBlocksCount = 2, cpu = 10, tiempoTotal = 4, color = null },
+    {
+      name,
+      priority = 'Media',
+      memoryBlocksCount = 2,
+      cpu = 10,
+      tiempoTotal = 4,
+      color = null,
+      existingProcesses = [],
+    },
     context = {}
   ) {
     if (!name || typeof name !== 'string' || name.trim() === '') {
@@ -55,6 +67,15 @@ export class SystemCalls {
     const requestedBlocks = Number(memoryBlocksCount);
     if (!Number.isInteger(requestedBlocks) || requestedBlocks <= 0) {
       throw new Error('[Syscall sys_create_process] Cantidad de bloques de memoria inválida.');
+    }
+
+    const duplicado = existingProcesses.some(
+      (p) => p.nombre === cleanName && p.estado !== ESTADOS.TERMINATED
+    );
+    if (duplicado) {
+      throw new Error(
+        `[Syscall sys_create_process] Ya existe un proceso activo llamado "${cleanName}". Use otro nombre o finalice el existente.`
+      );
     }
 
     // 1. Validar y reservar memoria en el MemoryManager
@@ -70,32 +91,47 @@ export class SystemCalls {
         ? 3
         : 4;
 
-    // 3. Crear PCB formal
-    const newProc = new Proceso({
-      nombre: cleanName,
-      prioridad: priorityNum,
-      memoriaRequerida: requestedBlocks * 16,
-      cpuRequerida: Number(cpu) || 10,
-      tiempoTotal: Number(tiempoTotal) || 4,
-      color: color || '#06B6D4',
-      isSystem: false,
-      description: `Proceso creado vía sys_create_process (${context?.role || 'ANÓNIMO'})`,
-    });
+    let newProc;
+    try {
+      // 3. Crear PCB formal
+      newProc = new Proceso({
+        nombre: cleanName,
+        prioridad: priorityNum,
+        memoriaRequerida: requestedBlocks * 16,
+        cpuRequerida: Number(cpu) || 10,
+        tiempoTotal: Number(tiempoTotal) || 4,
+        color: color || '#06B6D4',
+        isSystem: false,
+        description: `Proceso creado vía sys_create_process (${context?.role || 'ANÓNIMO'})`,
+      });
 
-    // 4. Emitir evento auditable
-    this.emitEvent({
-      type: 'PROCESS_CREATED',
-      source: EVENT_SOURCES.PROCESS_MGR,
-      severity: EVENT_SEVERITY.INFO,
-      pid: newProc.pid,
-      payload: {
-        ...newProc.toJSON(),
-        allocatedBlocks: memResult.allocatedBlocks,
-        allocatedMB: memResult.allocatedMB,
-        creatorRole: context?.role || 'GUEST',
-        isSandbox: this.persistence.isSandboxMode(),
-      },
-    });
+      if (!newProc.id) newProc.id = `p_${newProc.pid}`;
+
+      // 4. Emitir evento auditable
+      this.emitEvent({
+        type: 'PROCESS_CREATED',
+        source: EVENT_SOURCES.PROCESS_MGR,
+        severity: EVENT_SEVERITY.INFO,
+        pid: newProc.pid,
+        payload: {
+          ...newProc.toJSON(),
+          allocatedBlocks: memResult.allocatedBlocks,
+          allocatedMB: memResult.allocatedMB,
+          creatorRole: context?.role || 'GUEST',
+          isSandbox: this.persistence.isSandboxMode(),
+        },
+      });
+    } catch (err) {
+      // Rollback: devolver los bloques reservados si algo falló después de reservar
+      for (const blockId of memResult.blockIds) {
+        try {
+          this.memory.freeBlock(blockId);
+        } catch (_) {
+          // un bloque no liberable no debe ocultar el error original
+        }
+      }
+      throw err;
+    }
 
     // 5. Persistir (el adaptador dirige a sandbox o a almacenamiento compartido según el modo activo)
     this.persistence.saveProcess(newProc).catch(() => {});
@@ -104,8 +140,8 @@ export class SystemCalls {
 
   /**
    * Syscall: sys_terminate_process
-   * Permite finalizar procesos de usuario.
-   * RESTRICCIÓN DE SEGURIDAD: Procesos del sistema (isSystem = true) solo pueden finalizarse por ADMIN.
+   * Finaliza procesos de usuario. Procesos del sistema (isSystem) solo los finaliza ADMIN.
+   * Terminar un proceso ya finalizado devuelve un error claro.
    */
   terminateProcess(processId, context = {}, processesList = []) {
     const role = context?.role || 'GUEST';
@@ -132,6 +168,12 @@ export class SystemCalls {
       throw new Error('Acceso denegado: no se puede finalizar un proceso crítico del sistema sin rol ADMIN.');
     }
 
+    if (target.estado === ESTADOS.TERMINATED) {
+      throw new Error(
+        `[Syscall sys_terminate_process] El proceso PID ${target.pid} (${target.nombre}) ya está finalizado.`
+      );
+    }
+
     // Cambiar estado formal a TERMINATED
     target.finalizar();
 
@@ -156,7 +198,6 @@ export class SystemCalls {
 
   /**
    * Syscall: sys_allocate_memory
-   * Asigna bloques en el MemoryManager para el sandbox local o compartido.
    */
   allocateMemory(processName, blocksCount, context = {}, color = '#06B6D4') {
     const res = this.memory.allocate(processName, blocksCount, color);
@@ -171,9 +212,24 @@ export class SystemCalls {
 
   /**
    * Syscall: sys_free_memory
-   * Libera un bloque específico. Protege estrictamente los bloques de Kernel (0 a 7).
+   * Libera un bloque específico.
+   * - Los bloques de Kernel (0 a 7) nunca se liberan (lo impone MemoryManager).
+   * - Si se recibe processesList, un bloque de un proceso vivo NO puede liberarse a mano
+   *   (dejaría al proceso activo sin memoria y el mapa inconsistente).
    */
-  freeMemory(blockId, context = {}) {
+  freeMemory(blockId, context = {}, processesList = []) {
+    const block = this.memory.getBlocks().find((b) => b.id === Number(blockId));
+    if (block && block.state === 'ALLOCATED') {
+      const owner = processesList.find(
+        (p) => p.nombre === block.processName && p.estado !== ESTADOS.TERMINATED
+      );
+      if (owner) {
+        throw new Error(
+          `Operación denegada: el bloque #${blockId} pertenece al proceso activo PID ${owner.pid} (${owner.nombre}). Finalice el proceso para liberar su memoria.`
+        );
+      }
+    }
+
     const res = this.memory.freeBlock(blockId);
     this.emitEvent({
       type: 'MEM_FREED',
@@ -307,6 +363,89 @@ export class SystemCalls {
     return { success: true, file: fileRecord };
   }
 
+  /**
+   * Syscall: sys_rename_file
+   * Renombra un archivo existente sin duplicarlo. /system exige ADMIN.
+   */
+  renameFile(folder, fileId, newName, fileSystem, context = {}) {
+    if (!newName || typeof newName !== 'string' || newName.trim() === '') {
+      throw new Error('[Syscall renameFile] El nuevo nombre no puede estar vacío.');
+    }
+    const cleanName = newName.trim();
+
+    if (!fileSystem[folder]) {
+      throw new Error(`Directorio no encontrado: ${folder}`);
+    }
+
+    if ((folder === '/system' || folder === 'system') && context?.role !== 'ADMIN') {
+      this.emitEvent({
+        type: 'SECURITY_VIOLATION',
+        source: EVENT_SOURCES.SECURITY_GUARD,
+        severity: EVENT_SEVERITY.CRITICAL,
+        payload: { syscall: 'renameFile', folder, reason: 'Modificación denegada en /system sin rol ADMIN.' },
+      });
+      throw new Error('Acceso denegado: solo el rol ADMIN puede modificar archivos en /system.');
+    }
+
+    const idx = fileSystem[folder].findIndex((f) => f.id === fileId);
+    if (idx < 0) {
+      throw new Error(`Archivo no encontrado (id ${fileId}) en ${folder}.`);
+    }
+    if (fileSystem[folder].some((f, i) => i !== idx && f.name === cleanName)) {
+      throw new Error(`Ya existe un archivo llamado "${cleanName}" en ${folder}.`);
+    }
+
+    const previousName = fileSystem[folder][idx].name;
+    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const updated = { ...fileSystem[folder][idx], name: cleanName, modified: now };
+    fileSystem[folder][idx] = updated;
+
+    this.emitEvent({
+      type: 'VFS_FILE_RENAMED',
+      source: EVENT_SOURCES.VFS,
+      severity: EVENT_SEVERITY.INFO,
+      payload: { folder, previousName, newName: cleanName },
+    });
+
+    return { success: true, file: updated };
+  }
+
+  /**
+   * Syscall: sys_delete_file
+   * Elimina un archivo. /system exige ADMIN.
+   */
+  deleteFile(folder, fileId, fileSystem, context = {}) {
+    if (!fileSystem[folder]) {
+      throw new Error(`Directorio no encontrado: ${folder}`);
+    }
+
+    if ((folder === '/system' || folder === 'system') && context?.role !== 'ADMIN') {
+      this.emitEvent({
+        type: 'SECURITY_VIOLATION',
+        source: EVENT_SOURCES.SECURITY_GUARD,
+        severity: EVENT_SEVERITY.CRITICAL,
+        payload: { syscall: 'deleteFile', folder, reason: 'Eliminación denegada en /system sin rol ADMIN.' },
+      });
+      throw new Error('Acceso denegado: solo el rol ADMIN puede eliminar archivos en /system.');
+    }
+
+    const file = fileSystem[folder].find((f) => f.id === fileId);
+    if (!file) {
+      throw new Error(`Archivo no encontrado (id ${fileId}) en ${folder}.`);
+    }
+
+    fileSystem[folder] = fileSystem[folder].filter((f) => f.id !== fileId);
+
+    this.emitEvent({
+      type: 'VFS_FILE_DELETED',
+      source: EVENT_SOURCES.VFS,
+      severity: EVENT_SEVERITY.WARN,
+      payload: { path: `${folder}/${file.name}` },
+    });
+
+    return { success: true, file };
+  }
+
   // ==========================================
   // SYSCALLS DE DISPOSITIVOS
   // ==========================================
@@ -328,13 +467,21 @@ export class SystemCalls {
     const dev = devicesList.find((d) => d.id === deviceId);
     if (!dev) throw new Error(`Dispositivo no encontrado: ${deviceId}`);
 
+    const previous = dev.status;
     dev.status = nextStatus;
 
     this.emitEvent({
       type: 'DEVICE_STATE_CHANGED',
       source: EVENT_SOURCES.IOT_MANAGER,
       severity: EVENT_SEVERITY.INFO,
-      payload: { deviceId, name: dev.name, previous: dev.status, current: nextStatus, zone: dev.zone },
+      payload: {
+        deviceId,
+        name: dev.name,
+        previous,
+        current: nextStatus,
+        zone: dev.zone,
+        role: context?.role || 'GUEST',
+      },
     });
 
     this.persistence.saveDeviceState(deviceId, nextStatus, { name: dev.name, zone: dev.zone }).catch(() => {});

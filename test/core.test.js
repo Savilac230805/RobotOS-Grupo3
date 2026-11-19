@@ -33,6 +33,13 @@ function metricaDe(resultado, nombre) {
   return resultado.metricas.find((m) => m.nombre === nombre);
 }
 
+// Crea un SystemCalls con su propia memoria para que las pruebas no se contaminen entre sí
+function crearSyscalls(opciones = {}) {
+  const mem = opciones.mem || new MemoryManager();
+  const engine = opciones.engine || undefined;
+  return { sys: new SystemCalls(engine, undefined, mem), mem };
+}
+
 const datosBase = {
   nombre: 'Control de iluminación',
   prioridad: 3,
@@ -255,16 +262,17 @@ test('MemoryManager: libera todos los bloques de un proceso al finalizar', () =>
   assert.equal(mem.getFreeBlocksCount(), 56);
 });
 
-test('MemoryManager: protege bloques de Kernel y valida rol ADMIN para liberación manual', () => {
+test('MemoryManager: protege bloques de Kernel y libera bloques de usuario', () => {
   const mem = new MemoryManager();
-  // Rechaza liberar bloque de Kernel incluso con ADMIN
-  assert.throws(() => mem.freeBlock(0, 'ADMIN'), /espacio protegido del Kernel/);
-  // Rechaza sin rol ADMIN
-  assert.throws(() => mem.freeBlock(10, 'GUEST'), /requiere rol ADMIN/);
-  // Permite con ADMIN en bloque no-kernel
-  mem.allocate('test_proc', 2);
-  const res = mem.freeBlock(8, 'ADMIN');
-  assert.equal(res.success, true);
+  // Los bloques 0 a 7 (Kernel) nunca se pueden liberar
+  assert.throws(() => mem.freeBlock(0), /espacio protegido del Kernel/);
+  assert.throws(() => mem.freeBlock(7), /espacio protegido del Kernel/);
+  // Un bloque de usuario sí se puede liberar
+  const asig = mem.allocate('test_proc', 2);
+  assert.equal(mem.freeBlock(asig.blockIds[0]).success, true);
+  assert.equal(mem.getFreeBlocksCount(), 55);
+  // ID inválido
+  assert.throws(() => mem.freeBlock(999), /inválido/);
 });
 
 // ==========================================
@@ -287,15 +295,16 @@ test('BootManager: arranque exitoso ejecuta las 8 etapas completas en orden', as
 
 test('BootManager: simulación de fallo en una etapa activa Safe Mode y aborta etapas siguientes', async () => {
   const boot = new BootManager();
-  // Forzar fallo en etapa 4: KERNEL_INIT
+  // Forzar fallo en la etapa 4: PROCESS_MGR_INIT (Process Manager & Scheduler)
   const res = await boot.executeBoot({ failAtStage: 4 });
   assert.equal(res.success, false);
   assert.equal(res.safeMode, true);
   assert.equal(res.bootLog.length, 4);
   const failedStage = res.bootLog[3];
-  assert.equal(failedStage.id, 'KERNEL_INIT');
+  assert.equal(failedStage.id, 'PROCESS_MGR_INIT');
   assert.equal(failedStage.status, 'FAILED');
   assert.ok(failedStage.error.includes('etapa 4'));
+  assert.equal(boot.isSystemReady(), false);
 });
 
 test('BootManager: recupera log de arranque y confirma estado de sistema', async () => {
@@ -352,24 +361,29 @@ test('EventEngine: notifica suscriptores específicos y globales correctamente',
 });
 
 // ==========================================
-// 6. SYSTEM CALLS CON VALIDACIÓN DE ROL ADMIN (5 Tests)
+// 6. SYSTEM CALLS (reglas de sandbox)
 // ==========================================
-test('Syscalls: sys_create_process rechaza solicitudes sin rol ADMIN o parámetros vacíos', () => {
-  const sys = new SystemCalls();
-  // Sin rol ADMIN
+test('Syscalls: sys_create_process permite visitantes en sandbox y rechaza parámetros inválidos', () => {
+  const { sys } = crearSyscalls();
+
+  // Un visitante crea un proceso en su sandbox: permitido
+  const res = sys.createProcess({ name: 'mi_proceso' }, { role: 'GUEST' });
+  assert.equal(res.success, true);
+  assert.equal(res.process.estado, 'NEW');
+
+  // Nombre vacío: rechazado para cualquier rol
+  assert.throws(() => sys.createProcess({ name: '' }, { role: 'ADMIN' }), /no puede estar vacío/);
+  assert.throws(() => sys.createProcess({ name: '' }, { role: 'GUEST' }), /no puede estar vacío/);
+
+  // Memoria excesiva: rechazada
   assert.throws(
-    () => sys.createProcess({ name: 'mi_proceso' }, { role: 'USER' }),
-    /requiere rol ADMIN/
-  );
-  // Con ADMIN pero nombre vacío
-  assert.throws(
-    () => sys.createProcess({ name: '' }, { role: 'ADMIN' }),
-    /no puede estar vacío/
+    () => sys.createProcess({ name: 'gigante', memoryBlocksCount: 999 }, { role: 'GUEST' }),
+    /Memoria insuficiente/
   );
 });
 
 test('Syscalls: sys_create_process ejecuta con ADMIN, valida memoria y emite evento', () => {
-  const sys = new SystemCalls();
+  const { sys } = crearSyscalls();
   const res = sys.createProcess(
     { name: 'proc_autorizado', priority: 'Alta', memoryBlocksCount: 2, cpu: 15 },
     { role: 'ADMIN', user: { email: 'admin@robotos.local' } }
@@ -380,31 +394,101 @@ test('Syscalls: sys_create_process ejecuta con ADMIN, valida memoria y emite eve
   assert.equal(res.memory.allocatedBlocks, 2);
 });
 
-test('Syscalls: sys_terminate_process protege procesos de sistema y valida rol ADMIN', () => {
-  const sys = new SystemCalls();
+test('Syscalls: sys_create_process no deja memoria asignada si el PCB es inválido', () => {
+  const { sys, mem } = crearSyscalls();
+  const libresAntes = mem.getFreeBlocksCount();
+
+  // tiempoTotal decimal: el constructor de Proceso lo rechaza
+  assert.throws(
+    () => sys.createProcess({ name: 'proc_malo', tiempoTotal: 2.5, memoryBlocksCount: 3 }, { role: 'GUEST' }),
+    /entero/
+  );
+
+  // Los 3 bloques reservados deben haberse devuelto
+  assert.equal(mem.getFreeBlocksCount(), libresAntes);
+});
+
+test('Syscalls: sys_create_process rechaza nombres duplicados de procesos vivos', () => {
+  const { sys } = crearSyscalls();
+  const primero = sys.createProcess({ name: 'dup_proc' }, { role: 'GUEST' });
+
+  assert.throws(
+    () => sys.createProcess({ name: 'dup_proc', existingProcesses: [primero.process] }, { role: 'GUEST' }),
+    /Ya existe un proceso activo/
+  );
+
+  // Una vez finalizado, el nombre queda disponible de nuevo
+  sys.terminateProcess(primero.process.pid, { role: 'GUEST' }, [primero.process]);
+  const segundo = sys.createProcess(
+    { name: 'dup_proc', existingProcesses: [primero.process] },
+    { role: 'GUEST' }
+  );
+  assert.equal(segundo.success, true);
+});
+
+test('Syscalls: sys_terminate_process protege procesos de sistema', () => {
+  const { sys } = crearSyscalls();
   const procSistema = new Proceso({ ...datosBase, nombre: 'kernel_guard', isSystem: true });
   const procUsuario = new Proceso({ ...datosBase, nombre: 'user_app', isSystem: false });
 
-  // USER intenta matar proceso del sistema -> Rechazado
+  // Un USER no puede finalizar un proceso del sistema
   assert.throws(
-    () => sys.terminateProcess(procSistema.id, { role: 'USER' }, [procSistema]),
+    () => sys.terminateProcess(procSistema.pid, { role: 'USER' }, [procSistema]),
     /proceso crítico del sistema sin rol ADMIN/
   );
+  assert.notEqual(procSistema.estado, ESTADOS.TERMINATED);
 
-  // USER intenta matar proceso de usuario -> Rechazado
+  // Un USER sí puede finalizar su proceso de usuario
+  const res = sys.terminateProcess(procUsuario.pid, { role: 'USER' }, [procUsuario]);
+  assert.equal(res.success, true);
+  assert.equal(procUsuario.estado, ESTADOS.TERMINATED);
+
+  // Un ADMIN sí puede finalizar un proceso del sistema
+  const res2 = sys.terminateProcess(procSistema.pid, { role: 'ADMIN' }, [procSistema]);
+  assert.equal(res2.success, true);
+  assert.equal(procSistema.estado, ESTADOS.TERMINATED);
+
+  // Finalizar uno ya finalizado da un error claro
   assert.throws(
-    () => sys.terminateProcess(procUsuario.id, { role: 'USER' }, [procUsuario]),
-    /requiere rol ADMIN/
+    () => sys.terminateProcess(procUsuario.pid, { role: 'USER' }, [procUsuario]),
+    /ya está finalizado/
+  );
+});
+
+test('Syscalls: terminar un proceso libera exactamente su memoria', () => {
+  const { sys, mem } = crearSyscalls();
+  const libresAntes = mem.getFreeBlocksCount();
+
+  const res = sys.createProcess({ name: 'proc_memoria', memoryBlocksCount: 4 }, { role: 'GUEST' });
+  assert.equal(mem.getFreeBlocksCount(), libresAntes - 4);
+
+  const fin = sys.terminateProcess(res.process.pid, { role: 'GUEST' }, [res.process]);
+  assert.equal(fin.freedBlocks, 4);
+  assert.equal(mem.getFreeBlocksCount(), libresAntes);
+});
+
+test('Syscalls: freeMemory protege bloques de Kernel y de procesos activos', () => {
+  const { sys, mem } = crearSyscalls();
+
+  // Bloques de Kernel: nunca, con ningún rol
+  assert.throws(() => sys.freeMemory(0, { role: 'ADMIN' }), /espacio protegido del Kernel/);
+  assert.throws(() => sys.freeMemory(5, { role: 'GUEST' }), /espacio protegido del Kernel/);
+
+  // Bloque de un proceso vivo: rechazado
+  const res = sys.createProcess({ name: 'proc_vivo', memoryBlocksCount: 2 }, { role: 'GUEST' });
+  const bloque = res.memory.blockIds[0];
+  assert.throws(
+    () => sys.freeMemory(bloque, { role: 'GUEST' }, [res.process]),
+    /proceso activo/
   );
 
-  // ADMIN finaliza proceso -> Exitoso
-  const res = sys.terminateProcess(procUsuario.id, { role: 'ADMIN' }, [procUsuario]);
-  assert.equal(res.success, true);
-  assert.equal(procUsuario.estado, 'TERMINATED');
+  // Tras finalizar el proceso, toda su memoria queda libre
+  sys.terminateProcess(res.process.pid, { role: 'GUEST' }, [res.process]);
+  assert.equal(mem.getFreeBlocksCount(), 56);
 });
 
 test('Syscalls: VFS readFile y writeFile validan rutas y protegen /system', () => {
-  const sys = new SystemCalls();
+  const { sys } = crearSyscalls();
   const vfs = {
     '/system': [{ name: 'kernel.sys', size: '2 MB' }],
     '/apps': [{ name: 'notes.app', size: '10 KB' }],
@@ -428,20 +512,64 @@ test('Syscalls: VFS readFile y writeFile validan rutas y protegen /system', () =
   assert.equal(writeRes.success, true);
 });
 
-test('Syscalls: deviceWrite restringe actuadores de seguridad a visitantes GUEST', () => {
-  const sys = new SystemCalls();
+test('Syscalls: renameFile y deleteFile operan sin duplicar y protegen /system', () => {
+  const { sys } = crearSyscalls();
+  const vfs = {
+    '/system': [{ id: 'f1', name: 'kernel.sys', size: '2 MB' }],
+    '/apps': [
+      { id: 'f2', name: 'notes.app', size: '10 KB' },
+      { id: 'f3', name: 'otro.app', size: '1 KB' },
+    ],
+  };
+
+  // Renombrar no crea un archivo nuevo
+  const r = sys.renameFile('/apps', 'f2', 'notas.app', vfs, { role: 'GUEST' });
+  assert.equal(r.file.name, 'notas.app');
+  assert.equal(vfs['/apps'].length, 2);
+
+  // Nombre duplicado y nombre vacío: rechazados
+  assert.throws(() => sys.renameFile('/apps', 'f2', 'otro.app', vfs, { role: 'GUEST' }), /Ya existe/);
+  assert.throws(() => sys.renameFile('/apps', 'f2', '   ', vfs, { role: 'GUEST' }), /no puede estar vacío/);
+
+  // /system protegido para renombrar y eliminar
+  assert.throws(() => sys.renameFile('/system', 'f1', 'x.sys', vfs, { role: 'USER' }), /solo el rol ADMIN/);
+  assert.throws(() => sys.deleteFile('/system', 'f1', vfs, { role: 'USER' }), /solo el rol ADMIN/);
+
+  // Eliminar en /apps está permitido
+  const d = sys.deleteFile('/apps', 'f3', vfs, { role: 'GUEST' });
+  assert.equal(d.success, true);
+  assert.equal(vfs['/apps'].length, 1);
+
+  // ADMIN sí puede eliminar en /system
+  assert.equal(sys.deleteFile('/system', 'f1', vfs, { role: 'ADMIN' }).success, true);
+  assert.equal(vfs['/system'].length, 0);
+});
+
+test('Syscalls: deviceWrite permite operar dispositivos en el sandbox y registra el estado anterior', () => {
+  const engine = new EventEngine();
+  const { sys } = crearSyscalls({ engine });
   const cerradura = { id: 'd5', name: 'Cerradura Principal', type: 'lock', status: 'BLOQUEADA' };
   const luz = { id: 'd1', name: 'Luz Salón', type: 'light', status: 'OFF' };
 
-  // GUEST intenta abrir cerradura -> Denegado
-  assert.throws(
-    () => sys.deviceWrite('d5', 'DESBLOQUEADA', [cerradura], { role: 'GUEST' }),
-    /restringido para visitantes anónimos/
-  );
+  const eventos = [];
+  engine.subscribe('DEVICE_STATE_CHANGED', (e) => eventos.push(e));
 
-  // GUEST conmuta luz -> Permitido
+  // Un visitante conmuta una luz y una cerradura en su sandbox
   const resLuz = sys.deviceWrite('d1', 'ON', [luz], { role: 'GUEST' });
   assert.equal(resLuz.status, 'ON');
+
+  const resCerr = sys.deviceWrite('d5', 'DESBLOQUEADA', [cerradura], { role: 'GUEST' });
+  assert.equal(resCerr.status, 'DESBLOQUEADA');
+
+  // El evento guarda el estado anterior y el nuevo
+  assert.equal(eventos.length, 2);
+  assert.equal(eventos[0].payload.previous, 'OFF');
+  assert.equal(eventos[0].payload.current, 'ON');
+  assert.equal(eventos[1].payload.previous, 'BLOQUEADA');
+  assert.equal(eventos[1].payload.current, 'DESBLOQUEADA');
+
+  // Dispositivo inexistente
+  assert.throws(() => sys.deviceWrite('zzz', 'ON', [luz], { role: 'GUEST' }), /no encontrado/);
 });
 
 // ==========================================

@@ -21,18 +21,71 @@ import {
 
 const SystemContext = createContext();
 
+// ==========================================
+// PROCESOS INICIALES (se construyen UNA sola vez)
+// React StrictMode ejecuta los inicializadores de useState dos veces en desarrollo;
+// como cada Proceso consume un PID y reserva memoria en el singleton memoryManager,
+// la construcción debe ser idempotente.
+// ==========================================
+let initialProcessesCache = null;
+
+const buildInitialProcesses = () => {
+  if (initialProcessesCache) return initialProcessesCache;
+
+  initialProcessesCache = INITIAL_PROCESSES.map((p, idx) => {
+    const priorityNum = idx === 0 ? 3 : idx === 1 ? 2 : idx === 2 ? 1 : idx === 5 ? 1 : 3;
+    const memReq = p.memory || p.memoryBlocks * 16;
+    try {
+      memoryManager.allocate(p.name, p.memoryBlocks || Math.ceil(memReq / 16), p.color);
+    } catch (e) {
+      // Memoria insuficiente en la precarga: el proceso se crea igualmente sin bloques
+    }
+    const proc = new Proceso({
+      nombre: p.name,
+      prioridad: priorityNum,
+      memoriaRequerida: memReq,
+      cpuRequerida: p.cpu,
+      tiempoTotal: idx === 2 ? 8 : idx === 0 ? 6 : 4,
+      color: p.color,
+      isSystem: p.isSystem,
+      description: p.description,
+    });
+    if (!proc.id) proc.id = `p_${proc.pid}`;
+    return proc;
+  });
+
+  return initialProcessesCache;
+};
+
+// Compara un proceso con un identificador (id o pid)
+const sameId = (p, id) => p.id === id || p.pid === id;
+
+// Emite un evento al Event Engine sin que un fallo del bus tumbe la interfaz
+const safeEmit = (evt) => {
+  try {
+    return syscalls.emitEvent(evt);
+  } catch (e) {
+    console.warn('[SystemContext] emitEvent falló:', e.message);
+    return null;
+  }
+};
+
 export const SystemProvider = ({ children }) => {
   const { user, role } = useAuth();
   const authContext = useMemo(() => ({ user, role }), [user, role]);
 
   // ==========================================
-  // 1. ESTADO DE ARRANQUE (BOOT MANAGER - 8 ETAPAS)
+  // 1. ESTADO DE ARRANQUE (BOOT MANAGER)
   // ==========================================
   const [bootLog, setBootLog] = useState([]);
   const [isSystemReady, setIsSystemReady] = useState(false);
+  const bootStarted = useRef(false);
 
   useEffect(() => {
-    // Ejecutar secuencia canónica de arranque al montar el Kernel
+    // Evita arrancar dos veces bajo StrictMode
+    if (bootStarted.current) return;
+    bootStarted.current = true;
+
     bootManager.executeBoot().then((res) => {
       setBootLog(res.bootLog);
       setIsSystemReady(res.success);
@@ -40,35 +93,23 @@ export const SystemProvider = ({ children }) => {
   }, []);
 
   // ==========================================
-  // 2. MEMORIA FÍSICA (MemoryManager: 64 bloques x 16 MB)
+  // 2. MEMORIA FÍSICA (64 bloques x 16 MB)
+  // Se construyen primero los procesos iniciales para que el mapa
+  // de memoria arranque reflejando sus asignaciones.
   // ==========================================
-  const [memoryBlocks, setMemoryBlocks] = useState(() => memoryManager.getBlocks());
+  const [memoryBlocks, setMemoryBlocks] = useState(() => {
+    buildInitialProcesses();
+    return [...memoryManager.getBlocks()];
+  });
 
   // ==========================================
-  // 3. PROCESOS (Instancias de Proceso del Core)
+  // 3. PROCESOS
   // ==========================================
-  const [processes, setProcesses] = useState(() => {
-    return INITIAL_PROCESSES.map((p, idx) => {
-      const priorityNum = idx === 0 ? 3 : idx === 1 ? 2 : idx === 2 ? 1 : idx === 5 ? 1 : 3;
-      const memReq = p.memory || p.memoryBlocks * 16;
-      // Registrar asignación en memoryManager si no está asignado
-      try {
-        memoryManager.allocate(p.name, p.memoryBlocks || Math.ceil(memReq / 16), p.color);
-      } catch (e) {
-        // Ignorar en precarga inicial
-      }
-      return new Proceso({
-        nombre: p.name,
-        prioridad: priorityNum,
-        memoriaRequerida: memReq,
-        cpuRequerida: p.cpu,
-        tiempoTotal: idx === 2 ? 8 : idx === 0 ? 6 : 4,
-        color: p.color,
-        isSystem: p.isSystem,
-        description: p.description,
-      });
-    });
-  });
+  const [processes, setProcesses] = useState(() => [...buildInitialProcesses()]);
+
+  // Los Proceso son instancias que se mutan en su lugar (admitir, ejecutar...).
+  // Para que React re-renderice se publica una copia del arreglo.
+  const refreshProcesses = () => setProcesses((prev) => [...prev]);
 
   // ==========================================
   // 4. VFS, DISPOSITIVOS, LOGS Y ALERTAS
@@ -91,10 +132,19 @@ export const SystemProvider = ({ children }) => {
   const [currentCpuUsage, setCurrentCpuUsage] = useState(0);
   const [timeline, setTimeline] = useState([]);
 
-  // Latencia medida localmente vs estado de Realtime
-  const [localLatencyMs, setLocalLatencyMs] = useState(1);
+  // Latencia local: tiempo desde la acción en el kernel hasta el siguiente frame pintado.
+  const [localLatencyMs, setLocalLatencyMs] = useState(0);
   const realtimeStatus = 'NO CONECTADO (MODO LOCAL SIMULADO)';
-  const realtimeLatencyMs = null; // No inventar números: null al no haber conexión WebSocket activa
+  const realtimeLatencyMs = null; // No inventar números: null mientras no haya conexión Realtime
+
+  const measureLatency = (t0) => {
+    const publish = () => setLocalLatencyMs(+(performance.now() - t0).toFixed(1));
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(publish);
+    } else {
+      publish();
+    }
+  };
 
   const stateRef = useRef({
     processes,
@@ -143,8 +193,13 @@ export const SystemProvider = ({ children }) => {
       setTimeline((prev) => [...prev.slice(-39), resultado.eventoRegistro]);
     }
 
-    const tRender = performance.now() - t0;
-    setLocalLatencyMs(Math.max(1, Math.round(tRender)));
+    // Se mide hasta que React haya confirmado el render y el navegador pinte
+    const publish = () => setLocalLatencyMs(+(performance.now() - t0).toFixed(1));
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(publish);
+    } else {
+      publish();
+    }
   }, []);
 
   useEffect(() => {
@@ -174,8 +229,10 @@ export const SystemProvider = ({ children }) => {
   const usedBlocksCount = memoryManager.getUsedBlocksCount();
   const activeAlertsCount = alerts.filter((a) => a.state === 'Activa').length;
 
+  const runningNow = processes.find((p) => p.estado === ESTADOS.RUNNING);
+
   const metrics = {
-    cpuUsage: currentCpuUsage > 0 ? currentCpuUsage : (processes.find((p) => p.state === 'RUNNING')?.cpu || 0),
+    cpuUsage: currentCpuUsage > 0 ? currentCpuUsage : runningNow?.cpuRequerida ?? 0,
     ramUsageMB: usedBlocksCount * 16,
     ramTotalMB: 1024,
     storageUsageGB: 26.8,
@@ -205,7 +262,7 @@ export const SystemProvider = ({ children }) => {
 
   const addAlert = ({ title, details, severity = 'error' }) => {
     const newAlert = {
-      id: `alert_${Date.now()}`,
+      id: `alert_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
       timestamp: kernelClock.getTimestamp(),
       title,
       details,
@@ -220,7 +277,7 @@ export const SystemProvider = ({ children }) => {
       message: `[ALERTA EMITIDA] ${title}: ${details}`,
     });
 
-    syscalls.emitEvent({
+    safeEmit({
       type: 'ALERT_RAISED',
       source: 'ALERT_DAEMON',
       severity: severity === 'warning' ? 'WARN' : 'ERROR',
@@ -229,35 +286,33 @@ export const SystemProvider = ({ children }) => {
   };
 
   const resolveAlert = (alertId) => {
-    setAlerts((prev) =>
-      prev.map((al) => {
-        if (al.id === alertId) {
-          addLog({
-            level: 'INFO',
-            source: 'ALERT_DAEMON',
-            message: `Alerta "${al.title}" marcada como Resuelta por el operador.`,
-          });
-          syscalls.emitEvent({
-            type: 'ALERT_RESOLVED',
-            source: 'ALERT_DAEMON',
-            severity: 'INFO',
-            payload: { alertId, title: al.title },
-          });
-          return { ...al, state: 'Resuelta' };
-        }
-        return al;
-      })
-    );
+    const alerta = alerts.find((al) => al.id === alertId);
+    if (!alerta) return;
+
+    addLog({
+      level: 'INFO',
+      source: 'ALERT_DAEMON',
+      message: `Alerta "${alerta.title}" marcada como Resuelta por el operador.`,
+    });
+    safeEmit({
+      type: 'ALERT_RESOLVED',
+      source: 'ALERT_DAEMON',
+      severity: 'INFO',
+      payload: { alertId, title: alerta.title },
+    });
+
+    setAlerts((prev) => prev.map((al) => (al.id === alertId ? { ...al, state: 'Resuelta' } : al)));
   };
 
   // ==========================================
-  // 8. GESTIÓN DE PROCESOS Y MEMORIA VÍA SYSCALLS
+  // 8. PROCESOS Y MEMORIA VÍA SYSCALLS
+  // Ninguna acción con efectos secundarios (logs, eventos, syscalls)
+  // se ejecuta dentro de un setState(prev => ...): StrictMode los llama dos veces.
   // ==========================================
   const createProcess = ({ name, priority = 'Media', memoryBlocksCount = 2, cpu = 10, tiempoTotal = 4 }) => {
     try {
-      // Pasa estrictamente por la syscall validando rol ADMIN y memoria
       const res = syscalls.createProcess(
-        { name, priority, memoryBlocksCount, cpu, tiempoTotal },
+        { name, priority, memoryBlocksCount, cpu, tiempoTotal, existingProcesses: processes },
         authContext
       );
 
@@ -281,70 +336,105 @@ export const SystemProvider = ({ children }) => {
     }
   };
 
+  // Lleva un proceso a RUNNING garantizando una sola CPU:
+  // el que estuviera corriendo vuelve a READY (expropiación).
+  const promoteToRunning = (target) => {
+    processes.forEach((q) => {
+      if (q !== target && q.estado === ESTADOS.RUNNING) q.expropiar();
+    });
+    if (target.estado === ESTADOS.NEW) target.admitir();
+    if (target.estado === ESTADOS.READY) {
+      target.ejecutar();
+      setRunningProcessId(target.id);
+      setQuantumRestante(quantum);
+      return true;
+    }
+    return false;
+  };
+
   const executeProcess = (processId) => {
-    setProcesses((prev) =>
-      prev.map((p) => {
-        if (p.id === processId || p.pid === processId) {
-          if (p.estado === ESTADOS.NEW) {
-            p.admitir();
-          }
-          if (p.estado === ESTADOS.READY) {
-            p.ejecutar();
-            setRunningProcessId(p.id);
-            setQuantumRestante(quantum);
-          }
-          addLog({
-            level: 'INFO',
-            source: 'SCHEDULER',
-            message: `Proceso PID ${p.pid} (${p.nombre}) en estado [${p.estado}].`,
-          });
-          return p;
-        }
-        return p;
-      })
-    );
+    const target = processes.find((p) => sameId(p, processId));
+    if (!target) return;
+
+    if (target.estado !== ESTADOS.NEW && target.estado !== ESTADOS.READY) {
+      addLog({
+        level: 'WARN',
+        source: 'SCHEDULER',
+        message: `No se puede ejecutar PID ${target.pid} (${target.nombre}): estado actual [${target.estado}].`,
+      });
+      return;
+    }
+
+    const started = promoteToRunning(target);
+    refreshProcesses();
+
+    if (started) {
+      addLog({
+        level: 'INFO',
+        source: 'SCHEDULER',
+        message: `Proceso PID ${target.pid} (${target.nombre}) puesto en ejecución -> [RUNNING].`,
+      });
+      safeEmit({
+        type: 'PROCESS_STARTED',
+        source: 'PROCESS_MGR',
+        severity: 'INFO',
+        pid: target.pid,
+        payload: { nombre: target.nombre },
+      });
+    }
   };
 
   const pauseProcess = (processId) => {
-    setProcesses((prev) =>
-      prev.map((p) => {
-        if ((p.id === processId || p.pid === processId) && (p.estado === ESTADOS.RUNNING || p.estado === ESTADOS.READY)) {
-          p.pausar();
-          if (runningProcessId === p.id) {
-            setRunningProcessId(null);
-          }
-          addLog({
-            level: 'INFO',
-            source: 'SCHEDULER',
-            message: `Proceso PID ${p.pid} (${p.nombre}) pausado -> [WAITING].`,
-          });
-          return p;
-        }
-        return p;
-      })
-    );
+    const target = processes.find((p) => sameId(p, processId));
+    if (!target) return;
+
+    if (target.estado === ESTADOS.NEW) target.admitir();
+    if (target.estado !== ESTADOS.RUNNING && target.estado !== ESTADOS.READY) return;
+
+    target.pausar();
+    if (runningProcessId === target.id) {
+      setRunningProcessId(null);
+      setCurrentCpuUsage(0);
+    }
+    refreshProcesses();
+
+    addLog({
+      level: 'INFO',
+      source: 'SCHEDULER',
+      message: `Proceso PID ${target.pid} (${target.nombre}) pausado -> [WAITING].`,
+    });
+    safeEmit({
+      type: 'PROCESS_BLOCKED',
+      source: 'PROCESS_MGR',
+      severity: 'WARN',
+      pid: target.pid,
+      payload: { nombre: target.nombre },
+    });
   };
 
   const resumeProcess = (processId) => {
-    setProcesses((prev) =>
-      prev.map((p) => {
-        if ((p.id === processId || p.pid === processId) && p.estado === ESTADOS.WAITING) {
-          p.reanudar();
-          addLog({
-            level: 'INFO',
-            source: 'SCHEDULER',
-            message: `Proceso PID ${p.pid} (${p.nombre}) reanudado -> [READY].`,
-          });
-          return p;
-        }
-        return p;
-      })
-    );
+    const target = processes.find((p) => sameId(p, processId));
+    if (!target || target.estado !== ESTADOS.WAITING) return;
+
+    target.reanudar();
+    refreshProcesses();
+
+    addLog({
+      level: 'INFO',
+      source: 'SCHEDULER',
+      message: `Proceso PID ${target.pid} (${target.nombre}) reanudado -> [READY].`,
+    });
+    safeEmit({
+      type: 'PROCESS_RESUMED',
+      source: 'PROCESS_MGR',
+      severity: 'INFO',
+      pid: target.pid,
+      payload: { nombre: target.nombre },
+    });
   };
 
   const terminateProcess = (processId) => {
     try {
-      // Pasa estrictamente por la syscall validando rol ADMIN y proceso de sistema
       const res = syscalls.terminateProcess(processId, authContext, processes);
 
       if (runningProcessId === res.process.id) {
@@ -352,9 +442,7 @@ export const SystemProvider = ({ children }) => {
         setCurrentCpuUsage(0);
       }
 
-      setProcesses((prev) =>
-        prev.map((p) => (p.id === res.process.id ? res.process : p))
-      );
+      refreshProcesses();
       setMemoryBlocks([...memoryManager.getBlocks()]);
 
       addLog({
@@ -376,14 +464,13 @@ export const SystemProvider = ({ children }) => {
 
   const freeMemoryBlock = (blockId) => {
     try {
-      // Pasa estrictamente por syscall sys_free_memory
-      const res = syscalls.freeMemory(blockId, authContext);
+      syscalls.freeMemory(blockId, authContext, processes);
       setMemoryBlocks([...memoryManager.getBlocks()]);
 
       addLog({
         level: 'INFO',
         source: 'MEM_MANAGER',
-        message: `sys_free_memory: Bloque #${blockId} liberado por ${user?.email || 'ADMIN'}.`,
+        message: `sys_free_memory: Bloque #${blockId} liberado por ${user?.email || 'usuario'}.`,
       });
       return true;
     } catch (err) {
@@ -416,16 +503,13 @@ export const SystemProvider = ({ children }) => {
   };
 
   const updateFile = (folder, fileId, newName) => {
-    const existing = fileSystem[folder]?.find((f) => f.id === fileId);
-    if (!existing) return;
     try {
-      const path = `${folder}/${newName}`;
-      syscalls.writeFile(path, existing.content || '', fileSystem, { permissions: existing.permissions }, authContext);
+      syscalls.renameFile(folder, fileId, newName, fileSystem, authContext);
       setFileSystem({ ...fileSystem });
       addLog({
         level: 'INFO',
         source: 'VFS',
-        message: `sys_write_file: Archivo renombrado a "${newName}".`,
+        message: `sys_rename_file: Archivo renombrado a "${newName}" en ${folder}.`,
       });
     } catch (err) {
       addLog({ level: 'ERROR', source: 'VFS', message: err.message });
@@ -433,26 +517,17 @@ export const SystemProvider = ({ children }) => {
   };
 
   const deleteFile = (folder, fileId) => {
-    const file = fileSystem[folder]?.find((f) => f.id === fileId);
-    if (!file) return;
-
-    setFileSystem((prev) => ({
-      ...prev,
-      [folder]: prev[folder].filter((f) => f.id !== fileId),
-    }));
-
-    addLog({
-      level: 'WARN',
-      source: 'VFS',
-      message: `Archivo eliminado en ${folder}: "${file.name}".`,
-    });
-
-    syscalls.emitEvent({
-      type: 'VFS_FILE_DELETED',
-      source: 'VFS',
-      severity: 'WARN',
-      payload: { path: `${folder}/${file.name}` },
-    });
+    try {
+      const res = syscalls.deleteFile(folder, fileId, fileSystem, authContext);
+      setFileSystem({ ...fileSystem });
+      addLog({
+        level: 'WARN',
+        source: 'VFS',
+        message: `sys_delete_file: Archivo eliminado en ${folder}: "${res.file.name}".`,
+      });
+    } catch (err) {
+      addLog({ level: 'ERROR', source: 'VFS', message: err.message });
+    }
   };
 
   const readFile = (path) => {
@@ -464,58 +539,60 @@ export const SystemProvider = ({ children }) => {
   // ==========================================
   const toggleDevice = (id) => {
     const t0 = performance.now();
-    setDevices((prev) =>
-      prev.map((d) => {
-        if (d.id === id) {
-          let nextStatus = d.status;
-          switch (d.type) {
-            case 'light':
-              nextStatus = d.status === 'ON' ? 'OFF' : 'ON';
-              break;
-            case 'motion':
-              nextStatus = d.status === 'EN REPOSO' ? 'DETECTADO' : 'EN REPOSO';
-              break;
-            case 'camera':
-              nextStatus = d.status === 'ONLINE' ? 'OFFLINE' : 'ONLINE';
-              break;
-            case 'lock':
-              nextStatus = d.status === 'BLOQUEADA' ? 'DESBLOQUEADA' : 'BLOQUEADA';
-              break;
-            case 'climate':
-              const nextTemp = d.temperature >= 24 ? 20.0 : +(d.temperature + 1.5).toFixed(1);
-              nextStatus = `${nextTemp} °C`;
-              return { ...d, status: nextStatus, temperature: nextTemp };
-            default:
-              nextStatus = d.status === 'ON' ? 'OFF' : 'ON';
-          }
+    const d = devices.find((x) => x.id === id);
+    if (!d) return;
 
-          try {
-            syscalls.deviceWrite(id, nextStatus, [d], authContext);
-          } catch (err) {
-            addAlert({
-              title: 'Operación Denegada',
-              details: err.message,
-              severity: 'warning',
-            });
-            return d;
-          }
+    let nextStatus;
+    let extra = {};
 
-          addLog({
-            level: 'INFO',
-            source: 'IOT_MANAGER',
-            message: `sys_device_write: "${d.name}" conmutado a: ${nextStatus}.`,
-          });
-          return { ...d, status: nextStatus };
-        }
-        return d;
-      })
-    );
-    const latency = Math.max(1, Math.round(performance.now() - t0));
-    setLocalLatencyMs(latency);
+    switch (d.type) {
+      case 'light':
+        nextStatus = d.status === 'ON' ? 'OFF' : 'ON';
+        break;
+      case 'motion':
+        nextStatus = d.status === 'EN REPOSO' ? 'DETECTADO' : 'EN REPOSO';
+        break;
+      case 'camera':
+        nextStatus = d.status === 'ONLINE' ? 'OFFLINE' : 'ONLINE';
+        break;
+      case 'lock':
+        nextStatus = d.status === 'BLOQUEADA' ? 'DESBLOQUEADA' : 'BLOQUEADA';
+        break;
+      case 'climate': {
+        const nextTemp = d.temperature >= 24 ? 20.0 : +(d.temperature + 1.5).toFixed(1);
+        nextStatus = `${nextTemp} °C`;
+        extra = { temperature: nextTemp };
+        break;
+      }
+      default:
+        nextStatus = d.status === 'ON' ? 'OFF' : 'ON';
+    }
+
+    try {
+      // Se pasa una copia para que el syscall no mute el estado de React directamente
+      syscalls.deviceWrite(id, nextStatus, [{ ...d }], authContext);
+    } catch (err) {
+      addAlert({
+        title: 'Operación Denegada',
+        details: err.message,
+        severity: 'warning',
+      });
+      return;
+    }
+
+    setDevices((prev) => prev.map((x) => (x.id === id ? { ...x, status: nextStatus, ...extra } : x)));
+
+    addLog({
+      level: 'INFO',
+      source: 'IOT_MANAGER',
+      message: `sys_device_write: "${d.name}" conmutado a: ${nextStatus}.`,
+    });
+
+    measureLatency(t0);
   };
 
   // ==========================================
-  // 11. SIMULACIÓN DE FALLOS
+  // 11. SIMULACIÓN DE FALLOS (con transiciones de estado válidas)
   // ==========================================
   const simulateSensorDisconnected = () => {
     addAlert({
@@ -524,21 +601,50 @@ export const SystemProvider = ({ children }) => {
       severity: 'warning',
     });
 
-    setProcesses((prev) =>
-      prev.map((p) => {
-        if (p.nombre === 'temp_manager') {
-          p.pausar();
-          p.color = '#F59E0B';
-          return p;
-        }
-        return p;
-      })
-    );
-
     addLog({
       level: 'ERROR',
       source: 'HARDWARE_BUS',
       message: '[FALLO DETECTADO] Dispositivo sensor_temp_01 desconectado físicamente del bus I2C.',
+    });
+    safeEmit({
+      type: 'SENSOR_ALERT',
+      source: 'HARDWARE_BUS',
+      severity: 'ERROR',
+      payload: { device: 'sensor_temp_01', reason: 'Desconexión del bus I2C' },
+    });
+
+    const target = processes.find((p) => p.nombre === 'temp_manager');
+    if (!target) {
+      addLog({
+        level: 'WARN',
+        source: 'REACTOR',
+        message: '[REACCIÓN KERNEL] No se encontró el proceso "temp_manager" para bloquearlo.',
+      });
+      return;
+    }
+
+    if (target.estado === ESTADOS.NEW) target.admitir();
+    if (target.estado === ESTADOS.READY || target.estado === ESTADOS.RUNNING) {
+      target.pausar();
+      if (runningProcessId === target.id) {
+        setRunningProcessId(null);
+        setCurrentCpuUsage(0);
+      }
+    }
+    target.color = '#F59E0B';
+    refreshProcesses();
+
+    addLog({
+      level: 'WARN',
+      source: 'REACTOR',
+      message: `[REACCIÓN KERNEL] Proceso "temp_manager" (PID ${target.pid}) puesto en estado WAITING por falta de telemetría.`,
+    });
+    safeEmit({
+      type: 'PROCESS_BLOCKED',
+      source: 'PROCESS_MGR',
+      severity: 'WARN',
+      pid: target.pid,
+      payload: { nombre: target.nombre, motivo: 'Sensor desconectado' },
     });
   };
 
@@ -549,14 +655,28 @@ export const SystemProvider = ({ children }) => {
       severity: 'error',
     });
 
-    setDevices((prev) =>
-      prev.map((d) => (d.id === 'd5' ? { ...d, status: 'OFFLINE' } : d))
-    );
+    setDevices((prev) => prev.map((d) => (d.id === 'd5' ? { ...d, status: 'OFFLINE' } : d)));
 
     addLog({
       level: 'ERROR',
       source: 'NETWORK_STACK',
       message: '[FALLO DETECTADO] Pérdida de paquetes en nodo Zigbee 0x4A1F (Cerradura Puerta Principal).',
+    });
+    addLog({
+      level: 'WARN',
+      source: 'REACTOR',
+      message: '[REACCIÓN KERNEL] Dispositivo "Cerradura Puerta Principal" conmutado a estado OFFLINE.',
+    });
+    addLog({
+      level: 'INFO',
+      source: 'NETWORK_STACK',
+      message: '[REINTENTO CONEXIÓN] Handshake con nodo 0x4A1F (Reintento 1/3)... Fallido (Timeout 3000ms).',
+    });
+    safeEmit({
+      type: 'DEVICE_DISCONNECTED',
+      source: 'NETWORK_STACK',
+      severity: 'ERROR',
+      payload: { deviceId: 'd5', node: '0x4A1F', reason: 'Pérdida de enlace Zigbee' },
     });
   };
 
@@ -567,29 +687,42 @@ export const SystemProvider = ({ children }) => {
       severity: 'critical',
     });
 
-    setProcesses((prev) =>
-      prev.map((p) => {
-        if (p.nombre === 'surveillance_proc') {
-          p.prioridad = 1;
-          p.priority = 'Crítica';
-          p.color = '#EF4444';
-          if (p.estado === ESTADOS.READY || p.estado === ESTADOS.NEW) {
-            p.ejecutar();
-          }
-          return p;
-        }
-        return p;
-      })
-    );
-
-    setDevices((prev) =>
-      prev.map((d) => (d.type === 'lock' ? { ...d, status: 'BLOQUEADA' } : d))
-    );
-
     addLog({
       level: 'ERROR',
       source: 'SECURITY_CORE',
       message: '[FALLO DETECTADO] 3 intentos erróneos consecutivos en Cerradura Puerta Principal.',
+    });
+    safeEmit({
+      type: 'SECURITY_VIOLATION',
+      source: 'SECURITY_CORE',
+      severity: 'CRITICAL',
+      payload: { reason: '3 intentos erróneos en cerradura', zone: 'Entrada' },
+    });
+
+    const target = processes.find((p) => p.nombre === 'surveillance_proc');
+    if (target) {
+      target.prioridad = 1;
+      target.priority = 'Crítica';
+      target.color = '#EF4444';
+      if (target.estado === ESTADOS.WAITING) target.reanudar();
+      const started = promoteToRunning(target);
+      refreshProcesses();
+
+      addLog({
+        level: 'WARN',
+        source: 'REACTOR',
+        message: started
+          ? `[REACCIÓN KERNEL] Protocolo de intrusión: "surveillance_proc" (PID ${target.pid}) elevado a prioridad CRÍTICA y estado RUNNING.`
+          : `[REACCIÓN KERNEL] "surveillance_proc" (PID ${target.pid}) elevado a prioridad CRÍTICA (estado actual: ${target.estado}).`,
+      });
+    }
+
+    setDevices((prev) => prev.map((d) => (d.type === 'lock' ? { ...d, status: 'BLOQUEADA' } : d)));
+
+    addLog({
+      level: 'INFO',
+      source: 'REACTOR',
+      message: '[REACCIÓN HARDWARE] Cerrojo electrónico asegurado forzosamente: Estado fijado en BLOQUEADA.',
     });
   };
 
@@ -654,4 +787,4 @@ export const SystemProvider = ({ children }) => {
   );
 };
 
-export const useSystem = () => useContext(SystemContext);
+export const useSystem = () => useContext(SystemContext); 
