@@ -23,6 +23,7 @@ export class SystemCalls {
     this.memory = memory;
     this.processManager = manager;
     this.vfs = null;
+    this.memory.setEventPublisher?.((event) => this.emitEvent(event));
   }
 
   attachVirtualFileSystem(vfs) {
@@ -134,6 +135,7 @@ export class SystemCalls {
       deviceIds = [],
       tickLlegada = null,
       existingProcesses = [],
+      virtualSizeMB = undefined,
     },
     context = {}
   ) {
@@ -184,6 +186,9 @@ export class SystemCalls {
       });
       if (!newProc.id) newProc.id = `p_${newProc.pid}`;
       memResult = this.memory.allocate(cleanName, requestedBlocks, color || '#06B6D4', newProc.pid);
+      this.memory.createAddressSpace(newProc.pid, {
+        sizeMB: virtualSizeMB ?? Math.max(2048, requestedBlocks * 32),
+      });
       this.processManager?.register(newProc);
 
       // 4. Emitir evento auditable
@@ -221,6 +226,7 @@ export class SystemCalls {
           // un bloque no liberable no debe ocultar el error original
         }
       }
+      if (newProc) this.memory.releaseAddressSpace?.(newProc.pid, { emitEvents: false });
       if (newProc) this.processManager?.remove(newProc.pid);
       throw err;
     }
@@ -309,6 +315,13 @@ export class SystemCalls {
       });
     }
     return freedBlocks;
+  }
+
+  accessVirtualAddress(pid, address, options = {}) {
+    if (this.processManager && !this.processManager.get(pid)) {
+      throw new Error(`Proceso PID ${pid} no encontrado.`);
+    }
+    return this.memory.accessVirtualAddress(pid, address, options);
   }
 
   // ==========================================

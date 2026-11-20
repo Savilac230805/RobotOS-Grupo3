@@ -56,6 +56,9 @@ const buildInitialProcesses = () => {
     if (!proc.id) proc.id = `p_${proc.pid}`;
     proc.tickLlegada = kernelClock.getTicks();
     memoryManager.allocate(p.name, p.memoryBlocks || Math.ceil(memReq / 16), p.color, proc.pid);
+    memoryManager.createAddressSpace(proc.pid, {
+      sizeMB: Math.max(2048, proc.memoriaRequerida * 2),
+    });
     processManager.register(proc);
     return proc;
   });
@@ -193,6 +196,13 @@ bootManager.executeBoot().then((res) => {
     buildInitialProcesses();
     return [...memoryManager.getBlocks()];
   });
+  const [memoryStats, setMemoryStats] = useState(() => memoryManager.getStats());
+  const [virtualMemoryState, setVirtualMemoryState] = useState(() => memoryManager.getVirtualMemorySnapshot());
+  const refreshMemoryState = useCallback(() => {
+    setMemoryBlocks([...memoryManager.getBlocks()]);
+    setMemoryStats(memoryManager.getStats());
+    setVirtualMemoryState(memoryManager.getVirtualMemorySnapshot());
+  }, []);
 
   const vfsRef = useRef(null);
   if (!vfsRef.current) {
@@ -394,7 +404,7 @@ bootManager.executeBoot().then((res) => {
     setTickCount(nextTick);
     setTimeline(nextTimeline);
     setExecutionMetrics(metricRecord);
-    setMemoryBlocks([...memoryManager.getBlocks()]);
+    refreshMemoryState();
 
     // Se mide hasta que React haya confirmado el render y el navegador pinte
     const publish = () => setLocalLatencyMs(+(performance.now() - t0).toFixed(1));
@@ -403,7 +413,7 @@ bootManager.executeBoot().then((res) => {
     } else {
       publish();
     }
-  }, []);
+  }, [refreshMemoryState]);
 
   useEffect(() => {
     if (!isPlaying) return;
@@ -474,6 +484,9 @@ bootManager.executeBoot().then((res) => {
         nextProcess.color,
         nextProcess.pid
       );
+      memoryManager.createAddressSpace(nextProcess.pid, {
+        sizeMB: Math.max(2048, nextProcess.memoriaRequerida * 2),
+      });
       processManager.register(nextProcess);
       syscalls.emitEvent({
         type: 'PROCESS_CREATED',
@@ -499,7 +512,7 @@ bootManager.executeBoot().then((res) => {
     const allProcesses = [...processManager.getAll()];
     const nextTimeline = [];
     setProcesses(allProcesses);
-    setMemoryBlocks([...memoryManager.getBlocks()]);
+    refreshMemoryState();
     setTimeline(nextTimeline);
     setTickCount(0);
     setCurrentCpuUsage(0);
@@ -715,7 +728,7 @@ bootManager.executeBoot().then((res) => {
       processManager.register(res.process);
       syscalls.persist('saveProcess', res.process);
       refreshProcesses();
-      setMemoryBlocks([...memoryManager.getBlocks()]);
+      refreshMemoryState();
 
       addLog({
         level: 'INFO',
@@ -882,7 +895,7 @@ bootManager.executeBoot().then((res) => {
       }
 
       refreshProcesses();
-      setMemoryBlocks([...memoryManager.getBlocks()]);
+      refreshMemoryState();
 
       addLog({
         level: 'WARN',
@@ -904,7 +917,7 @@ bootManager.executeBoot().then((res) => {
   const freeMemoryBlock = (blockId) => {
     try {
       syscalls.freeMemory(blockId, authContext, processes);
-      setMemoryBlocks([...memoryManager.getBlocks()]);
+      refreshMemoryState();
 
       addLog({
         level: 'INFO',
@@ -921,6 +934,40 @@ bootManager.executeBoot().then((res) => {
       return false;
     }
   };
+
+  const configureVirtualPageSize = (pageSizeMB) => {
+    try {
+      const snapshot = memoryManager.configurePageSize(pageSizeMB);
+      refreshMemoryState();
+      return { success: true, snapshot };
+    } catch (error) {
+      return { success: false, reason: error.message };
+    }
+  };
+
+  const setVirtualMemoryAlgorithm = (algorithm) => {
+    try {
+      memoryManager.setReplacementAlgorithm(algorithm);
+      refreshMemoryState();
+      return { success: true };
+    } catch (error) {
+      return { success: false, reason: error.message };
+    }
+  };
+
+  const accessVirtualAddress = (pid, address, options) => {
+    try {
+      const result = syscalls.accessVirtualAddress(pid, address, options);
+      refreshMemoryState();
+      return { success: true, result };
+    } catch (error) {
+      refreshMemoryState();
+      return { success: false, reason: error.message };
+    }
+  };
+
+  const comparePageReplacement = (references, frameCount) =>
+    memoryManager.compareReferenceString(references, frameCount);
 
   // ==========================================
   // 9. VFS VÍA SYSCALLS
@@ -1266,6 +1313,8 @@ bootManager.executeBoot().then((res) => {
         metrics,
         processes,
         memoryBlocks,
+        memoryStats,
+        virtualMemoryState,
         freeBlocksCount,
         usedBlocksCount,
         fileSystem,
@@ -1299,6 +1348,10 @@ bootManager.executeBoot().then((res) => {
         resumeProcess,
         terminateProcess,
         freeMemoryBlock,
+        configureVirtualPageSize,
+        setVirtualMemoryAlgorithm,
+        accessVirtualAddress,
+        comparePageReplacement,
         createFile,
         writeFile,
         setFilePermissions,
