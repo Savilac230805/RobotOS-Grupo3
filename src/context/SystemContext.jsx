@@ -9,7 +9,10 @@ import {
   inMemoryAdapter,
   syscalls,
   memoryManager,
+  SYNC_STATUS,
 } from '../core';
+import { SupabasePersistenceAdapter } from '../core/persistence/SupabasePersistenceAdapter';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { useAuth } from './AuthContext';
 import {
   INITIAL_PROCESSES,
@@ -73,6 +76,50 @@ const safeEmit = (evt) => {
 export const SystemProvider = ({ children }) => {
   const { user, role } = useAuth();
   const authContext = useMemo(() => ({ user, role }), [user, role]);
+
+  // ==========================================
+  // 0. SELECCIÓN DE ADAPTADOR DE PERSISTENCIA
+  // Si Supabase está configurado y el usuario es ADMIN se usa SupabasePersistenceAdapter
+  // (escritura compartida protegida por RLS).
+  // En cualquier otro caso se usa InMemoryPersistenceAdapter (sandbox local).
+  // El adaptador se inyecta en el singleton syscalls para que todos los eventos
+  // emitidos desde cualquier punto del kernel lleguen al medio correcto.
+  // ==========================================
+ const [syncStatus, setSyncStatus] = useState(
+  isSupabaseConfigured ? SYNC_STATUS.IDLE : SYNC_STATUS.OFFLINE
+);
+
+const persistenceAdapterRef = useRef(inMemoryAdapter);
+const supabaseAdapterRef = useRef(null);
+
+// Se elige el adaptador UNA sola vez: Supabase para todos si está configurado.
+// El adaptador decide solo si cada evento va como 'sandbox' o 'admin'.
+useEffect(() => {
+  if (isSupabaseConfigured) {
+    if (!supabaseAdapterRef.current) {
+      supabaseAdapterRef.current = new SupabasePersistenceAdapter(supabase, {
+        fallback: inMemoryAdapter,
+      });
+    }
+    persistenceAdapterRef.current = supabaseAdapterRef.current;
+    syscalls.persistence = supabaseAdapterRef.current;
+    setSyncStatus(supabaseAdapterRef.current.getSyncStatus());
+  } else {
+    inMemoryAdapter.setSandboxMode(true);
+    persistenceAdapterRef.current = inMemoryAdapter;
+    syscalls.persistence = inMemoryAdapter;
+    setSyncStatus(SYNC_STATUS.OFFLINE);
+  }
+
+  const handleSyncEvent = (e) => setSyncStatus(e.detail.status);
+  window.addEventListener('robotos:sync', handleSyncEvent);
+  return () => window.removeEventListener('robotos:sync', handleSyncEvent);
+}, []);
+
+// Si cambia el usuario, el adaptador vuelve a comprobar si hay sesión real de ADMIN.
+useEffect(() => {
+  supabaseAdapterRef.current?.refreshOrigin();
+}, [user, role]);
 
   // ==========================================
   // 1. ESTADO DE ARRANQUE (BOOT MANAGER)
@@ -173,6 +220,10 @@ export const SystemProvider = ({ children }) => {
     const current = stateRef.current;
     const nextTick = current.tickCount + 1;
     kernelClock.tick();
+
+  current.processes.forEach((p) => {
+    if (p.estado === ESTADOS.NEW) p.admitir();
+    });
 
     const resultado = ejecutarTickInteractivo({
       procesos: current.processes,
@@ -535,7 +586,40 @@ export const SystemProvider = ({ children }) => {
   };
 
   // ==========================================
-  // 10. DISPOSITIVOS VÍA SYSCALLS
+  // 10. ACCIÓN "SALUDAR"
+  // Emite un evento ROBOT_GREETING por el Event Engine con el esquema JSON fijo.
+  // Si Supabase está configurado y el usuario es ADMIN, el evento se persiste en
+  // kernel_events (via SupabasePersistenceAdapter.saveEvent → insert a Supabase).
+  // En modo sandbox (visitante / sin Supabase) el evento queda en la caché local.
+  // ==========================================
+  const saludar = useCallback(() => {
+    const t0 = performance.now();
+    const event = safeEmit({
+      type: 'ROBOT_GREETING',
+      source: 'ROUTINE_ENGINE',
+      severity: 'INFO',
+      pid: null,
+      payload: {
+        message: '¡Hola! RobotOS SmartHouse operativo.',
+        operator: user?.email || 'visitante',
+        isSandbox: persistenceAdapterRef.current.isSandboxMode(),
+      },
+    });
+
+    addLog({
+      level: 'INFO',
+      source: 'ROUTINE_ENGINE',
+      message: `Acción Saludar ejecutada. Evento emitido: ${event?.id || '(ninguno)'}. Adaptador: ${
+        persistenceAdapterRef.current.isSandboxMode() ? 'InMemory/Sandbox' : 'Supabase'
+      }.`,
+    });
+
+    measureLatency(t0);
+    return event;
+  }, [user, role]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ==========================================
+  // 11. DISPOSITIVOS VÍA SYSCALLS
   // ==========================================
   const toggleDevice = (id) => {
     const t0 = performance.now();
@@ -778,8 +862,9 @@ export const SystemProvider = ({ children }) => {
         simulateCommLoss,
         simulateUnauthorizedAccess,
         getSystemSnapshot,
-        isSandboxMode: inMemoryAdapter.isSandboxMode(),
-        syncStatus: inMemoryAdapter.getSyncStatus(),
+        saludar,
+        isSandboxMode: persistenceAdapterRef.current.isSandboxMode(),
+        syncStatus,
       }}
     >
       {children}

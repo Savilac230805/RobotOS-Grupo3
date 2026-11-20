@@ -11,4 +11,5 @@ export * from './memoryManager.js';
 export * from './bootManager.js';
 export * from './persistence/IPersistenceAdapter.js';
 export * from './persistence/InMemoryPersistenceAdapter.js';
+export * from './persistence/SupabasePersistenceAdapter.js';
 export * from './syscalls.js';

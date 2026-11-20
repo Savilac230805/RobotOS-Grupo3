@@ -1,12 +1,19 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useSystem } from '../context/SystemContext';
 import { useAuth } from '../context/AuthContext';
 import { MetricCard } from '../components/overview/MetricCard';
 import { ResourceCharts } from '../components/overview/ResourceCharts';
+import { BOOT_STAGES } from '../core';
 
 export const OverviewPage = ({ onNavigate }) => {
-  const { metrics, processes, devices, alerts, logs, toggleDevice, addLog } = useSystem();
-  const { role, checkPermission } = useAuth();
+  const {
+    metrics, processes, devices, alerts, logs,
+    toggleDevice, addLog, bootLog, isSystemReady,
+    saludar, syncStatus,
+  } = useSystem();
+  const { role, checkPermission, isVisitor } = useAuth();
+
+  const [lastGreetId, setLastGreetId] = useState(null);
 
   const processStateCounts = processes.reduce((acc, p) => {
     const st = p.state || p.estado;
@@ -16,11 +23,29 @@ export const OverviewPage = ({ onNavigate }) => {
 
   const activeAlert = alerts.find((a) => a.state === 'Activa');
 
-  // GUEST solo debe ver Salón y Cocina
+  // GUEST (invitado de la casa) solo ve Salón y Cocina
   const isGuest = role === 'GUEST';
   const displayedDevices = isGuest
     ? devices.filter((d) => d.zone === 'Salón' || d.zone === 'Cocina')
     : devices;
+
+  // Estado del arranque: se lee del registro real que genera el Boot Manager
+  const bootRows = BOOT_STAGES.map((def) => ({
+    def,
+    rec: (bootLog || []).find((r) => r.id === def.id) || null,
+  }));
+  const bootFailed = (bootLog || []).some((r) => r.status === 'FAILED');
+  const bootLabel = bootFailed ? 'MODO SEGURO' : isSystemReady ? 'SYSTEM_READY' : 'INICIANDO...';
+  const bootLabelClass = bootFailed
+    ? 'bg-red-950 text-red-400 border-red-800/80'
+    : isSystemReady
+    ? 'bg-emerald-950 text-emerald-400 border-emerald-800/80'
+    : 'bg-amber-950 text-amber-400 border-amber-800/80';
+
+  const formatBootTime = (ts) => {
+    const s = String(ts || '');
+    return s.length >= 19 ? s.slice(11, 19) : s;
+  };
 
   const handleDeviceClick = (device) => {
     if (isGuest && (device.zone !== 'Salón' && device.zone !== 'Cocina')) {
@@ -36,6 +61,22 @@ export const OverviewPage = ({ onNavigate }) => {
     }
   };
 
+  // Badge de estado de sincronización con Supabase
+  const syncBadge = (() => {
+    const map = {
+      IDLE:    { label: 'SYNCED',  cls: 'text-emerald-400 bg-emerald-950/40 border-emerald-800/60', dot: 'bg-emerald-400' },
+      SYNCING: { label: 'SYNCING…', cls: 'text-cyan-400 bg-cyan-950/40 border-cyan-800/60 animate-pulse', dot: 'bg-cyan-400' },
+      ERROR:   { label: 'SYNC ERROR', cls: 'text-red-400 bg-red-950/40 border-red-800/60', dot: 'bg-red-400' },
+      OFFLINE: { label: 'LOCAL / SANDBOX', cls: 'text-slate-400 bg-slate-900 border-slate-700', dot: 'bg-slate-500' },
+    };
+    return map[syncStatus] || map.OFFLINE;
+  })();
+
+  const handleSaludar = () => {
+    const event = saludar();
+    setLastGreetId(event?.id || null);
+  };
+
   return (
     <div className="space-y-6">
       {/* Header de bienvenida */}
@@ -44,12 +85,12 @@ export const OverviewPage = ({ onNavigate }) => {
           <h2 className="text-2xl font-black tracking-tight text-white">Centro de Control</h2>
           <p className="text-xs text-slate-400">
             {isGuest
-              ? 'Vista de Visitante Anónimo: Monitoreo restringido a Salón y Cocina.'
+              ? 'Vista de Invitado: Monitoreo restringido a Salón y Cocina.'
               : 'Telemetría en tiempo real de RobotOS y supervisión del ecosistema doméstico.'}
           </p>
         </div>
 
-        {/* Latencias y Estado de Conexión Real */}
+        {/* Latencias, Sync y Estado de Conexión */}
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
           <div className="flex items-center space-x-1.5 text-cyan-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl">
             <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
@@ -61,23 +102,131 @@ export const OverviewPage = ({ onNavigate }) => {
             <span>REALTIME: <strong className="text-slate-300 uppercase">{metrics.realtimeStatus}</strong></span>
           </div>
 
+          {/* Badge de sincronización Supabase — estado real */}
+          <div className={`flex items-center space-x-1.5 border px-3 py-1.5 rounded-xl ${syncBadge.cls}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${syncBadge.dot}`}></span>
+            <span>DB: <strong>{syncBadge.label}</strong></span>
+          </div>
+
           <div className="flex items-center space-x-2 text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl">
             <span className={`w-2 h-2 rounded-full ${isGuest ? 'bg-amber-400' : 'bg-cyan-400'}`}></span>
-            <span>{isGuest ? 'PERFIL ANÓNIMO (SOLO LECTURA)' : 'SINCRONIZADO CON KERNEL'}</span>
+            <span>
+              {isGuest ? 'PERFIL INVITADO' : isVisitor ? 'MODO VISITANTE (SANDBOX LOCAL)' : 'SESIÓN AUTENTICADA'}
+            </span>
           </div>
         </div>
       </div>
+
+      {/* ACCIÓN "SALUDAR" — panel de prueba de ciclo completo */}
+      <div className="p-5 rounded-2xl bg-slate-900 border border-indigo-800/40 shadow-lg space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-white tracking-wide">Acción: Saludar</h3>
+            <p className="text-xs text-slate-400">
+              Emite <code className="text-indigo-400">ROBOT_GREETING</code> por el Event Engine.
+              {role === 'ADMIN'
+                ? ' El evento se persiste en kernel_events (Supabase).'
+                : ' En modo sandbox: queda en caché local, no llega a Supabase.'}
+            </p>
+          </div>
+          <button
+            onClick={handleSaludar}
+            className="shrink-0 px-4 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
+          >
+            👋 Saludar
+          </button>
+        </div>
+        {lastGreetId && (
+          <div className="font-mono text-[11px] text-indigo-300 bg-indigo-950/30 border border-indigo-900/50 rounded-xl px-3 py-2 break-all">
+            Último evento emitido: <strong>{lastGreetId}</strong>
+            <span className="ml-2 text-slate-400">
+              — Adaptador: {role === 'ADMIN' ? 'Supabase' : 'InMemory/Sandbox'}
+              {' '}— Sync: {syncBadge.label}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Banner explicativo para el visitante público */}
+      {isVisitor && (
+        <div className="p-4 rounded-2xl bg-cyan-950/20 border border-cyan-500/30 flex items-center space-x-3 text-xs text-cyan-100">
+          <span className="text-xl">ℹ️</span>
+          <div>
+            <strong className="font-semibold text-white">Modo Visitante:</strong>{' '}
+            Puedes explorar todo el sistema y operar tu propia simulación local sin crear una cuenta. Los cambios
+            no se comparten con otros usuarios. La administración del sistema y la configuración compartida
+            requieren iniciar sesión como administrador.
+          </div>
+        </div>
+      )}
 
       {/* Banner explicativo para GUEST */}
       {isGuest && (
         <div className="p-4 rounded-2xl bg-amber-950/20 border border-amber-500/40 flex items-center space-x-3 text-xs text-amber-200">
           <span className="text-xl">ℹ️</span>
           <div>
-            <strong className="font-semibold text-white">Acceso de Visitante Anónimo (Solo Lectura):</strong>{' '}
-            Puedes navegar e inspeccionar el sistema libremente en modo sandbox local. Los periféricos de seguridad (Cerraduras y Cámaras) y la modificación compartida del Kernel requieren autenticación con rol administrador (ADMIN).
+            <strong className="font-semibold text-white">Acceso de Invitado (Solo Lectura):</strong>{' '}
+            Como invitado solo tienes visibilidad y control sobre luces y climatización de Salón y Cocina. Los
+            dispositivos de Entrada, la telemetría y las bitácoras del Kernel requieren rol residente (USER) o
+            administrador (ADMIN).
           </div>
         </div>
       )}
+
+      {/* ARRANQUE DEL SISTEMA (Boot Manager) */}
+      <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 shadow-lg space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-bold text-white tracking-wide">Arranque del Sistema (Boot Manager)</h3>
+            <p className="text-xs text-slate-400">
+              Secuencia de 8 etapas registrada por el kernel al iniciar RobotOS.
+            </p>
+          </div>
+          <span className={`px-3 py-1 rounded-lg border text-[11px] font-mono font-bold ${bootLabelClass}`}>
+            {bootLabel}
+          </span>
+        </div>
+
+        {bootFailed && (
+          <div className="p-3 rounded-xl bg-red-950/30 border border-red-800/60 text-xs text-red-200">
+            El arranque falló en una etapa y el sistema entró en Modo Seguro. Las etapas posteriores no se
+            ejecutaron.
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+          {bootRows.map(({ def, rec }) => {
+            const status = rec ? rec.status : 'PENDIENTE';
+            const ok = status === 'COMPLETED';
+            const failed = status === 'FAILED';
+            return (
+              <div
+                key={def.id}
+                title={rec ? rec.result || rec.error || '' : def.description}
+                className={`p-3 rounded-xl border bg-slate-950/70 ${
+                  failed ? 'border-red-800/70' : ok ? 'border-emerald-900/50' : 'border-slate-800'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono text-slate-500">ETAPA {def.stage}</span>
+                  <span
+                    className={`text-[10px] font-mono font-bold ${
+                      failed ? 'text-red-400' : ok ? 'text-emerald-400' : 'text-slate-500'
+                    }`}
+                  >
+                    {failed ? '✖ FALLÓ' : ok ? '✔ OK' : '… PENDIENTE'}
+                  </span>
+                </div>
+                <div className="text-xs font-bold text-slate-200 mt-1 font-mono">{def.id}</div>
+                <div className="text-[10px] text-slate-400 mt-0.5 leading-snug">{def.name}</div>
+                <div className="text-[10px] font-mono text-slate-600 mt-1">
+                  {rec ? formatBootTime(rec.timestamp) : '--:--:--'}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
 
       {/* Banner de Alerta Crítica Activa */}
       {!isGuest && activeAlert && (
@@ -183,7 +332,7 @@ export const OverviewPage = ({ onNavigate }) => {
                 {isGuest ? 'Dispositivos de Áreas Comunes (Salón y Cocina)' : 'Estado de Dispositivos IoT'}
               </h3>
               <p className="text-xs text-slate-400">
-                {isGuest ? 'Controles accesibles para visitantes anónimos' : 'Lectura en tiempo real del ecosistema del hogar'}
+                {isGuest ? 'Controles accesibles para invitados' : 'Lectura en tiempo real del ecosistema del hogar'}
               </p>
             </div>
             <button

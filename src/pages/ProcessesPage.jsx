@@ -55,10 +55,6 @@ export const ProcessesPage = () => {
     e.preventDefault();
     setFormFeedback(null);
 
-    if (!checkPermission('ADMIN', 'Crear nuevo proceso en RobotOS', addLog)) {
-      return;
-    }
-
     if (!name.trim()) {
       setFormFeedback({ type: 'error', message: 'El nombre del proceso no puede estar vacío.' });
       return;
@@ -90,23 +86,14 @@ export const ProcessesPage = () => {
   };
 
   const handleExecute = (proc) => {
-    if (!checkPermission('USER', `Ejecutar proceso "${proc.name || proc.nombre}" (PID ${proc.pid})`, addLog)) {
-      return;
-    }
     executeProcess(proc.id);
   };
 
   const handlePause = (proc) => {
-    if (!checkPermission('USER', `Pausar proceso "${proc.name || proc.nombre}" (PID ${proc.pid})`, addLog)) {
-      return;
-    }
     pauseProcess(proc.id);
   };
 
   const handleResume = (proc) => {
-    if (!checkPermission('USER', `Reanudar proceso "${proc.name || proc.nombre}" (PID ${proc.pid})`, addLog)) {
-      return;
-    }
     resumeProcess(proc.id);
   };
 
@@ -126,9 +113,6 @@ export const ProcessesPage = () => {
       return;
     }
 
-    if (!checkPermission('ADMIN', `Finalizar proceso "${proc.name || proc.nombre}" (PID ${proc.pid})`, addLog)) {
-      return;
-    }
 
     terminateProcess(proc.id);
   };
