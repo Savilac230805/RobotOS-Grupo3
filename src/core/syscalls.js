@@ -14,24 +14,100 @@ import { eventEngine, EVENT_SOURCES, EVENT_SEVERITY } from './eventEngine.js';
 import { inMemoryAdapter } from './persistence/InMemoryPersistenceAdapter.js';
 import { memoryManager } from './memoryManager.js';
 import { Proceso, ESTADOS } from './proceso.js';
+import { processManager } from './processManager.js';
 
 export class SystemCalls {
-  constructor(events = eventEngine, persistence = inMemoryAdapter, memory = memoryManager) {
+  constructor(events = eventEngine, persistence = inMemoryAdapter, memory = memoryManager, manager = null) {
     this.events = events;
     this.persistence = persistence;
     this.memory = memory;
+    this.processManager = manager;
+    this.vfs = null;
+  }
+
+  attachVirtualFileSystem(vfs) {
+    this.vfs = vfs;
+    vfs?.setEventEmitter((event) => this.emitEvent(event));
+    return vfs;
+  }
+
+  createDirectory(path, options = {}, context = {}) {
+    if (!this.vfs) throw new Error('El Virtual File System no está conectado al Kernel');
+    return this.vfs.createDirectory(path, options, context);
+  }
+
+  createVirtualFile(path, content = '', options = {}, context = {}) {
+    if (!this.vfs) throw new Error('El Virtual File System no está conectado al Kernel');
+    return this.vfs.createFile(path, content, options, context);
+  }
+
+  readVirtualFile(path, context = {}, pid = null) {
+    if (!this.vfs) throw new Error('El Virtual File System no está conectado al Kernel');
+    return this.vfs.readFile(path, context, pid);
+  }
+
+  writeVirtualFile(path, content, context = {}, pid = null) {
+    if (!this.vfs) throw new Error('El Virtual File System no está conectado al Kernel');
+    return this.vfs.writeFile(path, content, context, pid);
+  }
+
+  renameVirtualFile(path, newName, context = {}, pid = null) {
+    if (!this.vfs) throw new Error('El Virtual File System no está conectado al Kernel');
+    return this.vfs.renameFile(path, newName, context, pid);
+  }
+
+  setVirtualFilePermissions(path, permissions, context = {}, pid = null) {
+    if (!this.vfs) throw new Error('El Virtual File System no está conectado al Kernel');
+    return this.vfs.setPermissions(path, permissions, context, pid);
+  }
+
+  deleteVirtualFile(path, context = {}, pid = null) {
+    if (!this.vfs) throw new Error('El Virtual File System no está conectado al Kernel');
+    return this.vfs.deleteFile(path, context, pid);
+  }
+
+  listVirtualDirectory(path, context = {}) {
+    if (!this.vfs) throw new Error('El Virtual File System no está conectado al Kernel');
+    return this.vfs.listDirectory(path, context);
   }
 
   // ==========================================
   // SYSCALLS DE EVENTOS
   // ==========================================
-  emitEvent({ type, source = EVENT_SOURCES.KERNEL, severity = EVENT_SEVERITY.INFO, pid = null, payload = {} }) {
+  emitEvent({
+    type,
+    source = EVENT_SOURCES.KERNEL,
+    severity = EVENT_SEVERITY.INFO,
+    pid = null,
+    payload = {},
+    correlationId = null,
+  }) {
     if (!type || typeof type !== 'string') {
       throw new Error('[Syscall emitEvent] El parámetro "type" es obligatorio y debe ser un string.');
     }
-    const event = this.events.emit({ type, source, severity, pid, payload });
-    this.persistence.saveEvent(event).catch(() => {});
+    const event = this.events.emit({ type, source, severity, pid, payload, correlationId });
+    this.persist('saveEvent', event);
     return event;
+  }
+
+  persist(method, ...args) {
+    try {
+      const operation = this.persistence[method](...args);
+      return Promise.resolve(operation).then((result) => {
+        if (result === false || result?.success === false) {
+          throw new Error(`${method} rechazado por el adaptador de persistencia`);
+        }
+        return result;
+      }).catch((error) => {
+        this.lastPersistenceError = error;
+        console.error(`[SystemCalls] ${method} falló:`, error);
+        return false;
+      });
+    } catch (error) {
+      this.lastPersistenceError = error;
+      console.error(`[SystemCalls] ${method} falló:`, error);
+      return Promise.resolve(false);
+    }
   }
 
   // ==========================================
@@ -55,6 +131,8 @@ export class SystemCalls {
       cpu = 10,
       tiempoTotal = 4,
       color = null,
+      deviceIds = [],
+      tickLlegada = null,
       existingProcesses = [],
     },
     context = {}
@@ -78,9 +156,6 @@ export class SystemCalls {
       );
     }
 
-    // 1. Validar y reservar memoria en el MemoryManager
-    const memResult = this.memory.allocate(cleanName, requestedBlocks, color || '#06B6D4');
-
     // 2. Mapear prioridad textual a entera (1 = más urgente)
     const priorityNum =
       priority === 'Crítica' || priority === 1
@@ -92,6 +167,7 @@ export class SystemCalls {
         : 4;
 
     let newProc;
+    let memResult;
     try {
       // 3. Crear PCB formal
       newProc = new Proceso({
@@ -103,9 +179,12 @@ export class SystemCalls {
         color: color || '#06B6D4',
         isSystem: false,
         description: `Proceso creado vía sys_create_process (${context?.role || 'ANÓNIMO'})`,
+        deviceIds,
+        tickLlegada,
       });
-
       if (!newProc.id) newProc.id = `p_${newProc.pid}`;
+      memResult = this.memory.allocate(cleanName, requestedBlocks, color || '#06B6D4', newProc.pid);
+      this.processManager?.register(newProc);
 
       // 4. Emitir evento auditable
       this.emitEvent({
@@ -121,20 +200,33 @@ export class SystemCalls {
           isSandbox: this.persistence.isSandboxMode(),
         },
       });
+      this.emitEvent({
+        type: 'MEMORY_ALLOCATED',
+        source: EVENT_SOURCES.MEM_MANAGER,
+        severity: EVENT_SEVERITY.INFO,
+        pid: newProc.pid,
+        payload: {
+          processName: cleanName,
+          blockIds: memResult.blockIds,
+          allocatedBlocks: memResult.allocatedBlocks,
+          allocatedMB: memResult.allocatedMB,
+        },
+      });
     } catch (err) {
       // Rollback: devolver los bloques reservados si algo falló después de reservar
-      for (const blockId of memResult.blockIds) {
+      for (const blockId of memResult?.blockIds || []) {
         try {
           this.memory.freeBlock(blockId);
         } catch (_) {
           // un bloque no liberable no debe ocultar el error original
         }
       }
+      if (newProc) this.processManager?.remove(newProc.pid);
       throw err;
     }
 
     // 5. Persistir (el adaptador dirige a sandbox o a almacenamiento compartido según el modo activo)
-    this.persistence.saveProcess(newProc).catch(() => {});
+    this.persist('saveProcess', newProc);
     return { success: true, process: newProc, memory: memResult };
   }
 
@@ -145,7 +237,9 @@ export class SystemCalls {
    */
   terminateProcess(processId, context = {}, processesList = []) {
     const role = context?.role || 'GUEST';
-    const target = processesList.find((p) => p.id === processId || p.pid === processId);
+    const target =
+      this.processManager?.getAll().find((process) => process.id === processId || process.pid === processId) ||
+      processesList.find((process) => process.id === processId || process.pid === processId);
 
     if (!target) {
       throw new Error(`[Syscall sys_terminate_process] Proceso con identificador ${processId} no encontrado.`);
@@ -175,10 +269,19 @@ export class SystemCalls {
     }
 
     // Cambiar estado formal a TERMINATED
+    const previousState = target.estado;
     target.finalizar();
 
     // Liberar memoria en el MemoryManager
-    const freedBlocks = this.memory.freeProcessMemory(target.nombre);
+    const freedBlocks = this.releaseProcessMemory(target.pid);
+
+    this.emitEvent({
+      type: 'PROCESS_STATE_CHANGED',
+      source: EVENT_SOURCES.PROCESS_MGR,
+      severity: EVENT_SEVERITY.INFO,
+      pid: target.pid,
+      payload: { from: previousState, to: ESTADOS.TERMINATED, reason: 'PROCESS_TERMINATED' },
+    });
 
     this.emitEvent({
       type: 'PROCESS_TERMINATED',
@@ -188,8 +291,24 @@ export class SystemCalls {
       payload: { pid: target.pid, nombre: target.nombre, freedBlocks, role },
     });
 
-    this.persistence.saveProcess(target).catch(() => {});
+    this.persist('saveProcess', target);
     return { success: true, process: target, freedBlocks };
+  }
+
+  releaseProcessMemory(pid) {
+    const process = this.memory.getBlocks().find((block) => block.ownerPid === Number(pid));
+    const processName = process?.processName || null;
+    const freedBlocks = this.memory.freeProcessMemory(Number(pid));
+    if (freedBlocks > 0) {
+      this.emitEvent({
+        type: 'MEMORY_RELEASED',
+        source: EVENT_SOURCES.MEM_MANAGER,
+        severity: EVENT_SEVERITY.INFO,
+        pid: Number(pid),
+        payload: { processName, freedBlocks, freedMB: freedBlocks * 16 },
+      });
+    }
+    return freedBlocks;
   }
 
   // ==========================================
@@ -200,11 +319,13 @@ export class SystemCalls {
    * Syscall: sys_allocate_memory
    */
   allocateMemory(processName, blocksCount, context = {}, color = '#06B6D4') {
-    const res = this.memory.allocate(processName, blocksCount, color);
+    const pid = Number.isInteger(context?.pid) ? context.pid : null;
+    const res = this.memory.allocate(processName, blocksCount, color, pid);
     this.emitEvent({
-      type: 'MEM_ALLOCATED',
+      type: 'MEMORY_ALLOCATED',
       source: EVENT_SOURCES.MEM_MANAGER,
       severity: EVENT_SEVERITY.INFO,
+      pid,
       payload: { processName, ...res, role: context?.role || 'GUEST' },
     });
     return res;
@@ -232,9 +353,10 @@ export class SystemCalls {
 
     const res = this.memory.freeBlock(blockId);
     this.emitEvent({
-      type: 'MEM_FREED',
+      type: 'MEMORY_RELEASED',
       source: EVENT_SOURCES.MEM_MANAGER,
       severity: EVENT_SEVERITY.INFO,
+      pid: block?.ownerPid ?? null,
       payload: { blockId, ...res, role: context?.role || 'GUEST' },
     });
     return res;
@@ -243,7 +365,8 @@ export class SystemCalls {
   // ==========================================
   // SYSCALLS DE ARCHIVOS (VFS)
   // ==========================================
-  readFile(path, fileSystem) {
+  readFile(path, fileSystem, context = {}, pid = null) {
+    if (this.vfs) return this.vfs.readFile(path, context, pid);
     if (!path || typeof path !== 'string') {
       throw new Error('[Syscall readFile] Parámetro de ruta inválido.');
     }
@@ -298,6 +421,17 @@ export class SystemCalls {
    * RESTRICCIÓN DE SEGURIDAD: Modificar archivos en /system exige rol ADMIN.
    */
   writeFile(path, content, fileSystem, options = { permissions: 'rw-r--r--' }, context = {}) {
+    if (this.vfs) {
+      if (!path || typeof path !== 'string') throw new Error('[Syscall writeFile] Parámetro de ruta inválido.');
+      const cleanPath = path.trim();
+      const separator = cleanPath.lastIndexOf('/');
+      const folder = separator <= 0 ? '/' : cleanPath.slice(0, separator);
+      const name = cleanPath.slice(separator + 1);
+      const existing = this.vfs.getSnapshot()[folder]?.some((file) => file.name === name);
+      return existing
+        ? this.vfs.writeFile(cleanPath, content, context)
+        : this.vfs.createFile(cleanPath, content, options, context);
+    }
     if (!path || typeof path !== 'string') {
       throw new Error('[Syscall writeFile] Parámetro de ruta inválido.');
     }
@@ -368,6 +502,11 @@ export class SystemCalls {
    * Renombra un archivo existente sin duplicarlo. /system exige ADMIN.
    */
   renameFile(folder, fileId, newName, fileSystem, context = {}) {
+    if (this.vfs) {
+      const file = this.vfs.getSnapshot()[folder]?.find((entry) => entry.id === fileId);
+      if (!file) throw new Error(`Archivo no encontrado (id ${fileId}) en ${folder}.`);
+      return this.vfs.renameFile(`${folder}/${file.name}`, newName, context);
+    }
     if (!newName || typeof newName !== 'string' || newName.trim() === '') {
       throw new Error('[Syscall renameFile] El nuevo nombre no puede estar vacío.');
     }
@@ -415,6 +554,11 @@ export class SystemCalls {
    * Elimina un archivo. /system exige ADMIN.
    */
   deleteFile(folder, fileId, fileSystem, context = {}) {
+    if (this.vfs) {
+      const file = this.vfs.getSnapshot()[folder]?.find((entry) => entry.id === fileId);
+      if (!file) throw new Error(`Archivo no encontrado (id ${fileId}) en ${folder}.`);
+      return this.vfs.deleteFile(`${folder}/${file.name}`, context);
+    }
     if (!fileSystem[folder]) {
       throw new Error(`Directorio no encontrado: ${folder}`);
     }
@@ -484,9 +628,9 @@ export class SystemCalls {
       },
     });
 
-    this.persistence.saveDeviceState(deviceId, nextStatus, { name: dev.name, zone: dev.zone }).catch(() => {});
+    this.persist('saveDeviceState', deviceId, nextStatus, { name: dev.name, zone: dev.zone });
     return dev;
   }
 }
 
-export const syscalls = new SystemCalls();
+export const syscalls = new SystemCalls(eventEngine, inMemoryAdapter, memoryManager, processManager);

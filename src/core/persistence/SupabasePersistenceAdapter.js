@@ -20,6 +20,7 @@
 // eventos pendientes, ERROR = último envío rechazado, OFFLINE = sin cliente.
 
 import { IPersistenceAdapter, SYNC_STATUS } from './IPersistenceAdapter.js';
+import { createEventId } from '../eventEngine.js';
 
 const EVENTS_TABLE = 'kernel_events';
 const BOOT_TABLE = 'boot_history';
@@ -181,8 +182,17 @@ export class SupabasePersistenceAdapter extends IPersistenceAdapter {
   saveProcess(p) {
     return this._delegate('saveProcess', [p], false);
   }
-  saveMetric(m) {
-    return this._delegate('saveMetric', [m], false);
+  async saveMetric(metric) {
+    this._mirror('saveMetric', [metric]);
+    return this.saveEvent({
+      id: createEventId(),
+      timestamp: metric?.timestamp || new Date().toISOString(),
+      source: 'SCHEDULER',
+      type: 'CPU_METRICS_RECORDED',
+      severity: 'INFO',
+      pid: null,
+      payload: metric,
+    });
   }
   getDevices() {
     return this._delegate('getDevices', [], []);

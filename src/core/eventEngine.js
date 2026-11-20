@@ -24,6 +24,14 @@ export const EVENT_SOURCES = Object.freeze({
   BOOT_MANAGER: 'BOOT_MANAGER',
 });
 
+export function createEventId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+    const random = Math.floor(Math.random() * 16);
+    return (char === 'x' ? random : (random & 0x3) | 0x8).toString(16);
+  });
+}
+
 export class EventEngine {
   constructor(clock = kernelClock) {
     this.clock = clock;
@@ -38,19 +46,27 @@ export class EventEngine {
    * id: identificador único con timestamp y secuencia aleatoria.
    * timestamp: generado estrictamente por el kernelClock.
    */
-  emit({ type, source = EVENT_SOURCES.KERNEL, severity = EVENT_SEVERITY.INFO, pid = null, payload = {} }) {
+  emit({
+    type,
+    source = EVENT_SOURCES.KERNEL,
+    severity = EVENT_SEVERITY.INFO,
+    pid = null,
+    payload = {},
+    correlationId = null,
+  }) {
     if (!type || typeof type !== 'string') {
       throw new Error('El tipo de evento (type) es obligatorio y debe ser un string');
     }
 
     const event = Object.freeze({
-      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      id: createEventId(),
       timestamp: this.clock.getISOTimestamp(),
       source,
       type,
       severity,
       pid: pid !== null ? Number(pid) : null,
       payload: payload && typeof payload === 'object' ? payload : { raw: payload },
+      ...(correlationId ? { correlationId } : {}),
     });
 
     // Guardar en bitácora circular

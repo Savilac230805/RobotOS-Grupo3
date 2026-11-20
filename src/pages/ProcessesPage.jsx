@@ -6,6 +6,7 @@ import { ALGORITMOS } from '../core';
 export const ProcessesPage = () => {
   const {
     processes,
+    devices,
     freeBlocksCount,
     createProcess,
     executeProcess,
@@ -22,6 +23,8 @@ export const ProcessesPage = () => {
     runningProcessId,
     quantumRestante,
     timeline,
+    executionMetrics,
+    comparisonResults,
     playSimulation,
     pauseSimulation,
     stepTick,
@@ -29,6 +32,7 @@ export const ProcessesPage = () => {
     setAlgorithm,
     setQuantum,
     setSimulationSpeed,
+    compareSchedulers,
   } = useSystem();
 
   const { role, checkPermission } = useAuth();
@@ -39,6 +43,7 @@ export const ProcessesPage = () => {
   const [memoryBlocksCount, setMemoryBlocksCount] = useState(2);
   const [cpu, setCpu] = useState(15);
   const [tiempoTotal, setTiempoTotal] = useState(4);
+  const [deviceIds, setDeviceIds] = useState([]);
   const [formFeedback, setFormFeedback] = useState(null);
 
   // Estados contados
@@ -66,6 +71,7 @@ export const ProcessesPage = () => {
       memoryBlocksCount: Number(memoryBlocksCount),
       cpu: Number(cpu),
       tiempoTotal: Number(tiempoTotal) || 4,
+      deviceIds,
     });
 
     if (res.success) {
@@ -77,10 +83,11 @@ export const ProcessesPage = () => {
       setMemoryBlocksCount(2);
       setCpu(15);
       setTiempoTotal(4);
+      setDeviceIds([]);
     } else {
       setFormFeedback({
         type: 'error',
-        message: 'No hay memoria suficiente para crear el proceso. Revisa la bandeja de alertas.',
+        message: res.reason || 'No se pudo crear el proceso. Revisa la bandeja de alertas.',
       });
     }
   };
@@ -294,7 +301,7 @@ export const ProcessesPage = () => {
         <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800/80 space-y-2">
           <div className="flex items-center justify-between text-xs font-mono">
             <span className="text-slate-400 uppercase text-[10px]">
-              Línea de Tiempo de Ejecución (Últimos {timeline.length} Ticks)
+              Línea de Tiempo de Ejecución (Últimos {Math.min(timeline.length, 40)} de {timeline.length} Ticks)
             </span>
             <span className="text-slate-500 text-[10px]">
               Proceso actual en CPU:{' '}
@@ -310,10 +317,14 @@ export const ProcessesPage = () => {
                 Inicia la simulación o pulsa "Paso a Paso" para visualizar los ticks de CPU.
               </span>
             ) : (
-              timeline.map((entry, idx) => (
+              timeline.slice(-40).map((entry, idx) => (
                 <div
-                  key={`${entry.tick}_${idx}`}
-                  className="h-full px-2 rounded flex flex-col justify-center items-center shrink-0 border border-cyan-500/40 bg-cyan-950/80 text-cyan-300 transition-all shadow-sm"
+                  key={`${entry.tick}_${entry.pid ?? 'idle'}_${idx}`}
+                  className={`h-full px-2 rounded flex flex-col justify-center items-center shrink-0 border transition-all shadow-sm ${
+                    entry.pid === null
+                      ? 'border-slate-700 bg-slate-800 text-slate-500'
+                      : 'border-cyan-500/40 bg-cyan-950/80 text-cyan-300'
+                  }`}
                   title={`Tick #${entry.tick}: PID ${entry.pid} [${entry.nombre}] (CPU: ${entry.cpu}%)`}
                 >
                   <span className="text-[9px] font-mono font-bold leading-none truncate max-w-[80px]">
@@ -327,6 +338,61 @@ export const ProcessesPage = () => {
             )}
           </div>
         </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
+          {[
+            ['Espera promedio', executionMetrics?.esperaPromedio, 'ticks'],
+            ['Retorno promedio', executionMetrics?.retornoPromedio, 'ticks'],
+            ['Respuesta promedio', executionMetrics?.respuestaPromedio, 'ticks'],
+            ['Utilización CPU', executionMetrics?.utilizacionCpu, '%'],
+            ['Cambios de contexto', executionMetrics?.cambiosContexto, ''],
+            ['Tiempo total', executionMetrics?.ticksTotales, 'ticks'],
+          ].map(([label, value, unit]) => (
+            <div key={label} className="p-3 rounded-xl bg-slate-950 border border-slate-800">
+              <div className="text-[9px] font-mono uppercase text-slate-500">{label}</div>
+              <div className="text-lg font-bold font-mono text-cyan-300 mt-1">
+                {value ?? '--'}{value !== null && value !== undefined ? ` ${unit}` : ''}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-xs text-slate-400">
+            Compara la misma carga y estado restante con ambos algoritmos.
+          </div>
+          <button
+            type="button"
+            onClick={compareSchedulers}
+            className="px-3 py-2 rounded-lg bg-purple-950 text-purple-300 border border-purple-700 hover:bg-purple-900 text-xs font-bold"
+          >
+            Comparar planificadores
+          </button>
+        </div>
+
+        {comparisonResults && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {[
+              ['PRIORIDAD', comparisonResults.prioridad],
+              ['ROUND ROBIN', comparisonResults.roundRobin],
+            ].map(([label, result]) => (
+              <div key={label} className="p-4 rounded-xl bg-slate-950 border border-slate-800">
+                <h4 className="text-xs font-bold text-white mb-3">{label}</h4>
+                <div className="grid grid-cols-2 gap-2 text-[10px] font-mono text-slate-400">
+                  <span>Espera media: <b className="text-cyan-300">{result.metrics.esperaPromedio ?? '--'}</b></span>
+                  <span>Retorno medio: <b className="text-cyan-300">{result.metrics.retornoPromedio ?? '--'}</b></span>
+                  <span>Respuesta media: <b className="text-cyan-300">{result.metrics.respuestaPromedio ?? '--'}</b></span>
+                  <span>Utilización: <b className="text-cyan-300">{result.metrics.utilizacionCpu}%</b></span>
+                  <span>Cambios contexto: <b className="text-cyan-300">{result.metrics.cambiosContexto}</b></span>
+                  <span>Duración: <b className="text-cyan-300">{result.metrics.ticksTotales} ticks</b></span>
+                </div>
+                <div className="mt-3 text-[10px] font-mono text-slate-500 break-words">
+                  {result.linea.map((entry) => entry.nombre).join(' → ') || 'Sin procesos ejecutables'}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 2. CONTADORES DE ESTADOS DEL KERNEL */}
@@ -348,8 +414,8 @@ export const ProcessesPage = () => {
           <div className="text-[10px] font-mono text-slate-400 uppercase">RUNNING</div>
         </div>
         <div className="p-3.5 rounded-xl bg-slate-900 border border-orange-900/40 text-center">
-          <div className="text-lg font-black text-orange-400">{stateCounts.WAITING || 0}</div>
-          <div className="text-[10px] font-mono text-slate-400 uppercase">WAITING</div>
+          <div className="text-lg font-black text-orange-400">{(stateCounts.BLOCKED || 0) + (stateCounts.WAITING || 0)}</div>
+          <div className="text-[10px] font-mono text-slate-400 uppercase">BLOCKED</div>
         </div>
         <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 text-center">
           <div className="text-lg font-black text-slate-500">{stateCounts.TERMINATED || 0}</div>
@@ -396,7 +462,7 @@ export const ProcessesPage = () => {
           </div>
         )}
 
-        <form onSubmit={handleCreateSubmit} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4 items-end">
+        <form onSubmit={handleCreateSubmit} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-8 gap-4 items-end">
           {/* Nombre */}
           <div className="lg:col-span-2">
             <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1">
@@ -473,14 +539,30 @@ export const ProcessesPage = () => {
             />
           </div>
 
+          <div className="lg:col-span-2">
+            <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1">
+              Dispositivos asociados
+            </label>
+            <select
+              multiple
+              value={deviceIds}
+              onChange={(event) => setDeviceIds(Array.from(event.target.selectedOptions, (option) => option.value))}
+              className="w-full min-h-20 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white font-mono"
+            >
+              {devices.map((device) => (
+                <option key={device.id} value={device.id}>{device.name}</option>
+              ))}
+            </select>
+          </div>
+
           {/* Botón de Envío */}
-          <div className="lg:col-span-6 sm:col-span-2 flex justify-end pt-2">
+          <div className="lg:col-span-8 sm:col-span-2 flex justify-end pt-2">
             <button
               type="submit"
               className="px-5 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs tracking-wide transition-all shadow-lg shadow-cyan-600/20 flex items-center space-x-2 cursor-pointer"
             >
               <span>+ Crear Proceso</span>
-              {role !== 'ADMIN' && <span className="text-[10px] text-cyan-200">(Requiere ADMIN)</span>}
+              {role !== 'ADMIN' && <span className="text-[10px] text-cyan-200">(Sandbox local)</span>}
             </button>
           </div>
         </form>
@@ -514,6 +596,7 @@ export const ProcessesPage = () => {
                 <th className="py-3 px-3">CPU</th>
                 <th className="py-3 px-3">Progreso (Ticks)</th>
                 <th className="py-3 px-3">Memoria</th>
+                <th className="py-3 px-3">Dispositivos</th>
                 <th className="py-3 px-3 text-center">Acciones de Control</th>
               </tr>
             </thead>
@@ -524,7 +607,7 @@ export const ProcessesPage = () => {
                 const isTerminated = estado === 'TERMINATED';
                 const canExecute = estado === 'NEW' || estado === 'READY';
                 const canPause = estado === 'RUNNING';
-                const canResume = estado === 'WAITING';
+                const canResume = estado === 'BLOCKED' || estado === 'WAITING';
                 const canTerminate = !isTerminated;
 
                 return (
@@ -568,7 +651,7 @@ export const ProcessesPage = () => {
                         className={`px-2 py-1 rounded text-[10px] font-bold ${
                           estado === 'RUNNING'
                             ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/80 animate-pulse'
-                            : estado === 'WAITING'
+                            : estado === 'WAITING' || estado === 'BLOCKED'
                             ? 'bg-orange-950 text-orange-400 border border-orange-800/80'
                             : estado === 'READY'
                             ? 'bg-amber-950 text-amber-400 border border-amber-800/80'
@@ -610,6 +693,23 @@ export const ProcessesPage = () => {
                           </span>
                         </div>
                       )}
+                    </td>
+
+                    <td className="py-3 px-3">
+                      <div className="flex flex-wrap gap-1">
+                        {(proc.deviceIds || []).length === 0 ? (
+                          <span className="text-slate-600">—</span>
+                        ) : (
+                          proc.deviceIds.map((deviceId) => (
+                            <span
+                              key={deviceId}
+                              className="px-1.5 py-0.5 rounded bg-slate-800 text-cyan-300 border border-slate-700"
+                            >
+                              {devices.find((device) => device.id === deviceId)?.name || deviceId}
+                            </span>
+                          ))
+                        )}
+                      </div>
                     </td>
 
                     {/* Botones de Acción */}

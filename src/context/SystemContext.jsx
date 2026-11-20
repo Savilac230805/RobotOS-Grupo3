@@ -4,6 +4,10 @@ import {
   ESTADOS,
   ALGORITMOS,
   ejecutarTickInteractivo,
+  calcularMetricas,
+  simular,
+  processManager,
+  VirtualFileSystem,
   kernelClock,
   bootManager,
   inMemoryAdapter,
@@ -31,6 +35,7 @@ const SystemContext = createContext();
 // la construcción debe ser idempotente.
 // ==========================================
 let initialProcessesCache = null;
+let initialProcessEventsPersisted = false;
 
 const buildInitialProcesses = () => {
   if (initialProcessesCache) return initialProcessesCache;
@@ -38,11 +43,6 @@ const buildInitialProcesses = () => {
   initialProcessesCache = INITIAL_PROCESSES.map((p, idx) => {
     const priorityNum = idx === 0 ? 3 : idx === 1 ? 2 : idx === 2 ? 1 : idx === 5 ? 1 : 3;
     const memReq = p.memory || p.memoryBlocks * 16;
-    try {
-      memoryManager.allocate(p.name, p.memoryBlocks || Math.ceil(memReq / 16), p.color);
-    } catch (e) {
-      // Memoria insuficiente en la precarga: el proceso se crea igualmente sin bloques
-    }
     const proc = new Proceso({
       nombre: p.name,
       prioridad: priorityNum,
@@ -54,6 +54,9 @@ const buildInitialProcesses = () => {
       description: p.description,
     });
     if (!proc.id) proc.id = `p_${proc.pid}`;
+    proc.tickLlegada = kernelClock.getTicks();
+    memoryManager.allocate(p.name, p.memoryBlocks || Math.ceil(memReq / 16), p.color, proc.pid);
+    processManager.register(proc);
     return proc;
   });
 
@@ -111,6 +114,35 @@ useEffect(() => {
     setSyncStatus(SYNC_STATUS.OFFLINE);
   }
 
+  if (!initialProcessEventsPersisted) {
+    initialProcessEventsPersisted = true;
+    for (const process of buildInitialProcesses()) {
+      const allocatedBlocks = memoryManager
+        .getBlocks()
+        .filter((block) => block.ownerPid === process.pid)
+        .map((block) => block.id);
+      syscalls.emitEvent({
+        type: 'PROCESS_CREATED',
+        source: 'PROCESS_MGR',
+        pid: process.pid,
+        payload: process.toJSON(),
+      });
+      syscalls.emitEvent({
+        type: 'MEMORY_ALLOCATED',
+        source: 'MEM_MANAGER',
+        pid: process.pid,
+        payload: {
+          processName: process.nombre,
+          blockIds: allocatedBlocks,
+          allocatedBlocks: allocatedBlocks.length,
+          allocatedMB: allocatedBlocks.length * 16,
+          initial: true,
+        },
+      });
+      syscalls.persist('saveProcess', process);
+    }
+  }
+
   const handleSyncEvent = (e) => setSyncStatus(e.detail.status);
   window.addEventListener('robotos:sync', handleSyncEvent);
   return () => window.removeEventListener('robotos:sync', handleSyncEvent);
@@ -133,12 +165,25 @@ useEffect(() => {
     if (bootStarted.current) return;
     bootStarted.current = true;
 
-    bootManager.executeBoot().then((res) => {
-      setBootLog(res.bootLog);
-      setIsSystemReady(res.success);
-    });
-  }, []);
+bootManager.executeBoot().then((res) => {
+  console.log('[BOOT] terminó. success =', res.success, '| campos:', Object.keys(res));
+  setBootLog(res.bootLog);
+  setIsSystemReady(res.success);
 
+  const adapter = persistenceAdapterRef.current;
+  adapter
+    .saveBootRecord({
+      timestamp: new Date().toISOString(),
+      success: res.success,
+      safeMode: Boolean(res.safeMode),
+      stages: res.bootLog,
+    })
+    .then((ok) =>
+      console.log('[BOOT] saveBootRecord ->', ok, '| adaptador:', adapter.name, '| error:', adapter.lastError)
+    )
+    .catch((e) => console.warn('[BOOT] saveBootRecord lanzó error:', e));
+});
+});
   // ==========================================
   // 2. MEMORIA FÍSICA (64 bloques x 16 MB)
   // Se construyen primero los procesos iniciales para que el mapa
@@ -149,19 +194,31 @@ useEffect(() => {
     return [...memoryManager.getBlocks()];
   });
 
+  const vfsRef = useRef(null);
+  if (!vfsRef.current) {
+    vfsRef.current = syscalls.attachVirtualFileSystem(new VirtualFileSystem(INITIAL_FILE_SYSTEM));
+  }
+
   // ==========================================
   // 3. PROCESOS
   // ==========================================
-  const [processes, setProcesses] = useState(() => [...buildInitialProcesses()]);
+  const [processes, setProcesses] = useState(() => {
+    buildInitialProcesses();
+    return processManager.getAll();
+  });
 
   // Los Proceso son instancias que se mutan en su lugar (admitir, ejecutar...).
   // Para que React re-renderice se publica una copia del arreglo.
-  const refreshProcesses = () => setProcesses((prev) => [...prev]);
+  const refreshProcesses = () => {
+    const currentProcesses = processManager.getAll();
+    stateRef.current = { ...stateRef.current, processes: currentProcesses };
+    setProcesses(currentProcesses);
+  };
 
   // ==========================================
   // 4. VFS, DISPOSITIVOS, LOGS Y ALERTAS
   // ==========================================
-  const [fileSystem, setFileSystem] = useState(INITIAL_FILE_SYSTEM);
+  const [fileSystem, setFileSystem] = useState(() => vfsRef.current.getSnapshot());
   const [devices, setDevices] = useState(INITIAL_DEVICES);
   const [logs, setLogs] = useState(INITIAL_LOGS);
   const [alerts, setAlerts] = useState(INITIAL_ALERTS);
@@ -178,6 +235,8 @@ useEffect(() => {
   const [quantumRestante, setQuantumRestante] = useState(2);
   const [currentCpuUsage, setCurrentCpuUsage] = useState(0);
   const [timeline, setTimeline] = useState([]);
+  const [executionMetrics, setExecutionMetrics] = useState(null);
+  const [comparisonResults, setComparisonResults] = useState(null);
 
   // Latencia local: tiempo desde la acción en el kernel hasta el siguiente frame pintado.
   const [localLatencyMs, setLocalLatencyMs] = useState(0);
@@ -201,6 +260,7 @@ useEffect(() => {
     quantum,
     tickCount,
     timeline,
+    lastPid: null,
   });
 
   useEffect(() => {
@@ -212,6 +272,7 @@ useEffect(() => {
       quantum,
       tickCount,
       timeline,
+      lastPid: stateRef.current.lastPid,
     };
   }, [processes, runningProcessId, quantumRestante, algorithm, quantum, tickCount, timeline]);
 
@@ -221,8 +282,13 @@ useEffect(() => {
     const nextTick = current.tickCount + 1;
     kernelClock.tick();
 
-  current.processes.forEach((p) => {
-    if (p.estado === ESTADOS.NEW) p.admitir();
+    const admissions = [];
+    current.processes.forEach((p) => {
+      if (p.estado === ESTADOS.NEW) {
+        p.admitir();
+        p.tickLlegada ??= nextTick - 1;
+        admissions.push(p);
+      }
     });
 
     const resultado = ejecutarTickInteractivo({
@@ -232,17 +298,103 @@ useEffect(() => {
       quantumRestanteActual: current.quantumRestante,
       procesoRunningId: current.runningProcessId,
       tickActual: nextTick,
+      ultimoPid: current.lastPid,
     });
 
-    setProcesses([...resultado.procesos]);
+    admissions.forEach((process) => {
+      safeEmit({
+        type: 'PROCESS_STATE_CHANGED',
+        source: 'PROCESS_MGR',
+        pid: process.pid,
+        payload: { from: ESTADOS.NEW, to: ESTADOS.READY, reason: 'ADMITTED' },
+      });
+    });
+
+    resultado.cambios.forEach((change) => {
+      safeEmit({
+        type: 'PROCESS_STATE_CHANGED',
+        source: 'PROCESS_MGR',
+        pid: change.pid,
+        payload: { from: change.de, to: change.a, reason: change.motivo },
+      });
+      const process = processManager.get(change.pid);
+      if (process) syscalls.persist('saveProcess', process);
+      if (change.a === ESTADOS.TERMINATED) {
+        syscalls.releaseProcessMemory(change.pid);
+        safeEmit({
+          type: 'PROCESS_TERMINATED',
+          source: 'PROCESS_MGR',
+          severity: 'INFO',
+          pid: change.pid,
+          payload: { nombre: change.nombre, reason: 'CPU_BURST_COMPLETED' },
+        });
+      }
+    });
+
+    if (resultado.cambioContexto) {
+      safeEmit({
+        type: 'CPU_CONTEXT_SWITCH',
+        source: 'SCHEDULER',
+        pid: resultado.cambioContexto.hacia,
+        payload: {
+          fromPid: resultado.cambioContexto.desde,
+          toPid: resultado.cambioContexto.hacia,
+        },
+      });
+    }
+
+    const executionRecord = resultado.eventoRegistro || {
+      tick: nextTick - 1,
+      pid: null,
+      nombre: 'IDLE',
+      cpu: 0,
+    };
+    safeEmit({
+      type: 'CPU_EXECUTION',
+      source: 'SCHEDULER',
+      pid: executionRecord.pid,
+      payload: { ...executionRecord, algorithm: current.algorithm },
+    });
+
+    const nextTimeline = [...current.timeline, executionRecord];
+    const metricResult = calcularMetricas({
+      procesos: processManager.getAll(),
+      linea: nextTimeline.filter((entry) => entry.pid !== null),
+      ticksTotales: nextTick,
+    });
+    const metricRecord = {
+      timestamp: new Date().toISOString(),
+      algorithm: current.algorithm,
+      quantum: current.algorithm === ALGORITMOS.ROUND_ROBIN ? current.quantum : null,
+      ...metricResult.resumen,
+      processes: metricResult.filas,
+    };
+    Promise.resolve(persistenceAdapterRef.current.saveMetric(metricRecord)).then((result) => {
+      if (result === false || result?.success === false) {
+        console.error('[SystemContext] No se pudieron persistir las métricas de CPU');
+      }
+    }).catch((error) => console.error('[SystemContext] Persistencia de métricas falló:', error));
+
+    resultado.procesos.forEach((process) => processManager.register(process));
+    const lastPid = resultado.eventoRegistro?.pid ?? current.lastPid;
+    stateRef.current = {
+      ...current,
+      processes: processManager.getAll(),
+      runningProcessId: resultado.procesoRunningId,
+      quantumRestante: resultado.quantumRestante,
+      tickCount: nextTick,
+      timeline: nextTimeline,
+      lastPid,
+    };
+
+    setProcesses(processManager.getAll());
     setRunningProcessId(resultado.procesoRunningId);
     setQuantumRestante(resultado.quantumRestante);
     setCurrentCpuUsage(resultado.cpuInstatanea);
     setTickCount(nextTick);
-
-    if (resultado.eventoRegistro) {
-      setTimeline((prev) => [...prev.slice(-39), resultado.eventoRegistro]);
-    }
+    setTimeline(nextTimeline);
+    setExecutionMetrics(metricRecord);
+    setMemoryBlocks([...memoryManager.getBlocks()]);
 
     // Se mide hasta que React haya confirmado el render y el navegador pinte
     const publish = () => setLocalLatencyMs(+(performance.now() - t0).toFixed(1));
@@ -266,11 +418,188 @@ useEffect(() => {
   const pauseSimulation = () => setIsPlaying(false);
   const resetSimulation = () => {
     setIsPlaying(false);
+    const activeProcesses = processManager
+      .getAll()
+      .filter((process) => process.estado !== ESTADOS.TERMINATED);
+    const activePids = new Set(activeProcesses.map((process) => process.pid));
+    const allocatedToActive = memoryManager
+      .getBlocks()
+      .filter((block) => block.state === 'ALLOCATED' && activePids.has(block.ownerPid)).length;
+    const requiredBlocks = activeProcesses.reduce((total, process) => total + process.memoryBlocks, 0);
+    if (requiredBlocks > memoryManager.getFreeBlocksCount() + allocatedToActive) {
+      addAlert({
+        title: 'No se pudo reiniciar la simulación',
+        details: 'La memoria disponible no permite restaurar todos los procesos activos.',
+        severity: 'error',
+      });
+      return false;
+    }
+
+    activeProcesses.forEach((process) => {
+      const previousState = process.estado;
+      process.finalizar();
+      safeEmit({
+        type: 'PROCESS_STATE_CHANGED',
+        source: 'PROCESS_MGR',
+        pid: process.pid,
+        payload: { from: previousState, to: ESTADOS.TERMINATED, reason: 'SIMULATION_RESET' },
+      });
+      safeEmit({
+        type: 'PROCESS_TERMINATED',
+        source: 'PROCESS_MGR',
+        pid: process.pid,
+        payload: { nombre: process.nombre, reason: 'SIMULATION_RESET' },
+      });
+      syscalls.persist('saveProcess', process);
+      syscalls.releaseProcessMemory(process.pid);
+      processManager.remove(process.pid);
+    });
+
+    const restarted = activeProcesses.map((process) => {
+      const nextProcess = new Proceso({
+        nombre: process.nombre,
+        prioridad: process.prioridad,
+        memoriaRequerida: process.memoriaRequerida,
+        cpuRequerida: process.cpuRequerida,
+        tiempoTotal: process.tiempoTotal,
+        color: process.color,
+        isSystem: process.isSystem,
+        description: process.description,
+        deviceIds: process.deviceIds,
+        tickLlegada: 0,
+      });
+      const allocation = memoryManager.allocate(
+        nextProcess.nombre,
+        nextProcess.memoryBlocks,
+        nextProcess.color,
+        nextProcess.pid
+      );
+      processManager.register(nextProcess);
+      syscalls.emitEvent({
+        type: 'PROCESS_CREATED',
+        source: 'PROCESS_MGR',
+        pid: nextProcess.pid,
+        payload: { ...nextProcess.toJSON(), restarted: true },
+      });
+      syscalls.emitEvent({
+        type: 'MEMORY_ALLOCATED',
+        source: 'MEM_MANAGER',
+        pid: nextProcess.pid,
+        payload: {
+          processName: nextProcess.nombre,
+          blockIds: allocation.blockIds,
+          allocatedBlocks: allocation.allocatedBlocks,
+          allocatedMB: allocation.allocatedMB,
+          restarted: true,
+        },
+      });
+      syscalls.persist('saveProcess', nextProcess);
+      return nextProcess;
+    });
+    const allProcesses = [...processManager.getAll()];
+    const nextTimeline = [];
+    setProcesses(allProcesses);
+    setMemoryBlocks([...memoryManager.getBlocks()]);
+    setTimeline(nextTimeline);
     setTickCount(0);
-    setTimeline([]);
     setCurrentCpuUsage(0);
     setRunningProcessId(null);
     setQuantumRestante(quantum);
+    setExecutionMetrics(null);
+    setComparisonResults(null);
+    stateRef.current = {
+      ...stateRef.current,
+      processes: allProcesses,
+      tickCount: 0,
+      timeline: nextTimeline,
+      runningProcessId: null,
+      quantumRestante: quantum,
+      lastPid: null,
+    };
+    return restarted.length > 0;
+  };
+
+  const compareSchedulers = () => {
+    const workload = processManager
+      .getAll()
+      .filter((process) => process.estado !== ESTADOS.TERMINATED)
+      .map((process) => ({
+        nombre: process.nombre,
+        prioridad: process.prioridad,
+        memoriaRequerida: process.memoriaRequerida,
+        cpuRequerida: process.cpuRequerida,
+        tiempoTotal: process.tiempoRestante,
+        color: process.color,
+        isSystem: process.isSystem,
+        description: process.description,
+        originalPid: process.pid,
+      }));
+    const simulationId = globalThis.crypto?.randomUUID?.() || `simulation-${Date.now()}`;
+    const run = (algorithm, selectedQuantum) => {
+      const simulationProcesses = workload.map((process) => {
+        const clone = new Proceso(process);
+        clone.pid = process.originalPid;
+        clone.id = `simulation_${simulationId}_${clone.pid}`;
+        clone.tickLlegada = 0;
+        return clone;
+      });
+      const result = simular(simulationProcesses, { algoritmo: algorithm, quantum: selectedQuantum });
+      let previousPid = null;
+      result.linea.forEach((entry) => {
+        safeEmit({
+          type: 'CPU_EXECUTION',
+          source: 'SCHEDULER',
+          pid: entry.pid,
+          correlationId: simulationId,
+          payload: { ...entry, algorithm, simulationId, mode: 'COMPARISON' },
+        });
+        if (previousPid !== null && previousPid !== entry.pid) {
+          safeEmit({
+            type: 'CPU_CONTEXT_SWITCH',
+            source: 'SCHEDULER',
+            pid: entry.pid,
+            correlationId: simulationId,
+            payload: { fromPid: previousPid, toPid: entry.pid, algorithm, mode: 'COMPARISON' },
+          });
+        }
+        previousPid = entry.pid;
+      });
+      const metrics = {
+        timestamp: new Date().toISOString(),
+        simulationId,
+        algorithm,
+        quantum: algorithm === ALGORITMOS.ROUND_ROBIN ? selectedQuantum : null,
+        ...result.resumenMetricas,
+        processes: result.metricasDetalladas,
+      };
+      Promise.resolve(persistenceAdapterRef.current.saveMetric(metrics)).then((saved) => {
+        if (saved === false || saved?.success === false) {
+          console.error(`[SystemContext] No se persistió la comparación ${algorithm}`);
+        }
+      }).catch((error) => console.error(`[SystemContext] Error persistiendo ${algorithm}:`, error));
+      return { ...result, metrics };
+    };
+
+    const results = {
+      prioridad: run(ALGORITMOS.PRIORIDAD, quantum),
+      roundRobin: run(ALGORITMOS.ROUND_ROBIN, quantum),
+    };
+    setComparisonResults(results);
+    return results;
+  };
+
+  const configureQuantum = (value) => {
+    const nextQuantum = Number(value);
+    if (![2, 4, 8].includes(nextQuantum)) {
+      throw new Error('El quantum Round Robin debe ser 2, 4 u 8 ticks');
+    }
+    setQuantum(nextQuantum);
+    setQuantumRestante(nextQuantum);
+    stateRef.current = {
+      ...stateRef.current,
+      quantum: nextQuantum,
+      quantumRestante: nextQuantum,
+    };
   };
 
   // ==========================================
@@ -360,14 +689,32 @@ useEffect(() => {
   // Ninguna acción con efectos secundarios (logs, eventos, syscalls)
   // se ejecuta dentro de un setState(prev => ...): StrictMode los llama dos veces.
   // ==========================================
-  const createProcess = ({ name, priority = 'Media', memoryBlocksCount = 2, cpu = 10, tiempoTotal = 4 }) => {
+  const createProcess = ({
+    name,
+    priority = 'Media',
+    memoryBlocksCount = 2,
+    cpu = 10,
+    tiempoTotal = 4,
+    deviceIds = [],
+  }) => {
     try {
       const res = syscalls.createProcess(
-        { name, priority, memoryBlocksCount, cpu, tiempoTotal, existingProcesses: processes },
+        {
+          name,
+          priority,
+          memoryBlocksCount,
+          cpu,
+          tiempoTotal,
+          deviceIds,
+          tickLlegada: stateRef.current.tickCount,
+          existingProcesses: processManager.getAll(),
+        },
         authContext
       );
 
-      setProcesses((prev) => [...prev, res.process]);
+      processManager.register(res.process);
+      syscalls.persist('saveProcess', res.process);
+      refreshProcesses();
       setMemoryBlocks([...memoryManager.getBlocks()]);
 
       addLog({
@@ -387,24 +734,56 @@ useEffect(() => {
     }
   };
 
+  const recordProcessStateChange = (process, from, to, reason) => {
+    safeEmit({
+      type: 'PROCESS_STATE_CHANGED',
+      source: 'PROCESS_MGR',
+      pid: process.pid,
+      payload: { from, to, reason },
+    });
+    syscalls.persist('saveProcess', process);
+  };
+
   // Lleva un proceso a RUNNING garantizando una sola CPU:
   // el que estuviera corriendo vuelve a READY (expropiación).
   const promoteToRunning = (target) => {
-    processes.forEach((q) => {
-      if (q !== target && q.estado === ESTADOS.RUNNING) q.expropiar();
-    });
-    if (target.estado === ESTADOS.NEW) target.admitir();
+    const previousRunning = processManager.getAll().find((process) => process.estado === ESTADOS.RUNNING);
+    if (previousRunning && previousRunning !== target) {
+      previousRunning.expropiar();
+      recordProcessStateChange(previousRunning, ESTADOS.RUNNING, ESTADOS.READY, 'MANUAL_PREEMPTION');
+    }
+    if (target.estado === ESTADOS.NEW) {
+      target.admitir();
+      target.tickLlegada ??= stateRef.current.tickCount;
+      recordProcessStateChange(target, ESTADOS.NEW, ESTADOS.READY, 'ADMITTED');
+    }
     if (target.estado === ESTADOS.READY) {
+      const previousPid = previousRunning && previousRunning !== target ? previousRunning.pid : null;
       target.ejecutar();
       setRunningProcessId(target.id);
       setQuantumRestante(quantum);
+      recordProcessStateChange(target, ESTADOS.READY, ESTADOS.RUNNING, 'MANUAL_DISPATCH');
+      if (previousPid !== null) {
+        safeEmit({
+          type: 'CPU_CONTEXT_SWITCH',
+          source: 'SCHEDULER',
+          pid: target.pid,
+          payload: { fromPid: previousPid, toPid: target.pid },
+        });
+      }
+      stateRef.current = {
+        ...stateRef.current,
+        runningProcessId: target.id,
+        quantumRestante: quantum,
+        lastPid: target.pid,
+      };
       return true;
     }
     return false;
   };
 
   const executeProcess = (processId) => {
-    const target = processes.find((p) => sameId(p, processId));
+    const target = processManager.getAll().find((p) => sameId(p, processId));
     if (!target) return;
 
     if (target.estado !== ESTADOS.NEW && target.estado !== ESTADOS.READY) {
@@ -436,16 +815,23 @@ useEffect(() => {
   };
 
   const pauseProcess = (processId) => {
-    const target = processes.find((p) => sameId(p, processId));
+    const target = processManager.getAll().find((p) => sameId(p, processId));
     if (!target) return;
 
-    if (target.estado === ESTADOS.NEW) target.admitir();
+    if (target.estado === ESTADOS.NEW) {
+      target.admitir();
+      target.tickLlegada ??= stateRef.current.tickCount;
+      recordProcessStateChange(target, ESTADOS.NEW, ESTADOS.READY, 'ADMITTED');
+    }
     if (target.estado !== ESTADOS.RUNNING && target.estado !== ESTADOS.READY) return;
 
-    target.pausar();
+    const previousState = target.estado;
+    target.bloquear();
+    recordProcessStateChange(target, previousState, ESTADOS.BLOCKED, 'MANUAL_BLOCK');
     if (runningProcessId === target.id) {
       setRunningProcessId(null);
       setCurrentCpuUsage(0);
+      stateRef.current = { ...stateRef.current, runningProcessId: null };
     }
     refreshProcesses();
 
@@ -464,10 +850,12 @@ useEffect(() => {
   };
 
   const resumeProcess = (processId) => {
-    const target = processes.find((p) => sameId(p, processId));
-    if (!target || target.estado !== ESTADOS.WAITING) return;
+    const target = processManager.getAll().find((p) => sameId(p, processId));
+    if (!target || (target.estado !== ESTADOS.BLOCKED && target.estado !== ESTADOS.WAITING)) return;
 
+    const previousState = target.estado;
     target.reanudar();
+    recordProcessStateChange(target, previousState, ESTADOS.READY, 'MANUAL_RESUME');
     refreshProcesses();
 
     addLog({
@@ -537,52 +925,99 @@ useEffect(() => {
   // ==========================================
   // 9. VFS VÍA SYSCALLS
   // ==========================================
-  const createFile = (folder, { name, size = '10 KB', content = '' }) => {
-    const path = `${folder}/${name}`;
+  const createDirectory = (path, permissions) => {
     try {
-      const res = syscalls.writeFile(path, content, fileSystem, { permissions: 'rw-r--r--' }, authContext);
-      setFileSystem({ ...fileSystem });
+      const directory = syscalls.createDirectory(path, { permissions }, authContext);
+      setFileSystem(vfsRef.current.getSnapshot());
       addLog({
         level: 'INFO',
         source: 'VFS',
-        message: `sys_write_file: Archivo creado en ${path}.`,
+        message: `sys_create_directory: Directorio creado en ${directory.path}.`,
       });
-      return res;
+      return directory;
     } catch (err) {
       addLog({ level: 'ERROR', source: 'VFS', message: err.message });
+      return { success: false, reason: err.message };
     }
   };
 
-  const updateFile = (folder, fileId, newName) => {
+  const createFile = (folder, { name, content = '', permissions = 'rw-r--r--' }, pid = null) => {
     try {
-      syscalls.renameFile(folder, fileId, newName, fileSystem, authContext);
-      setFileSystem({ ...fileSystem });
+      const path = `${folder}/${name}`;
+      const file = syscalls.createVirtualFile(path, content, { permissions, pid }, authContext);
+      setFileSystem(vfsRef.current.getSnapshot());
       addLog({
         level: 'INFO',
         source: 'VFS',
-        message: `sys_rename_file: Archivo renombrado a "${newName}" en ${folder}.`,
+        message: `sys_create_file: Archivo creado en ${path}.`,
       });
+      return { success: true, file };
     } catch (err) {
       addLog({ level: 'ERROR', source: 'VFS', message: err.message });
+      return { success: false, reason: err.message };
     }
   };
 
-  const deleteFile = (folder, fileId) => {
+  const writeFile = (path, content, pid = null) => {
     try {
-      const res = syscalls.deleteFile(folder, fileId, fileSystem, authContext);
-      setFileSystem({ ...fileSystem });
+      const file = syscalls.writeVirtualFile(path, content, authContext, pid);
+      setFileSystem(vfsRef.current.getSnapshot());
+      addLog({
+        level: 'INFO',
+        source: 'VFS',
+        message: `sys_write_file: Archivo actualizado en ${path}.`,
+      });
+      return { success: true, file };
+    } catch (err) {
+      addLog({ level: 'ERROR', source: 'VFS', message: err.message });
+      return { success: false, reason: err.message };
+    }
+  };
+
+  const setFilePermissions = (path, permissions, pid = null) => {
+    try {
+      const file = syscalls.setVirtualFilePermissions(path, permissions, authContext, pid);
+      setFileSystem(vfsRef.current.getSnapshot());
+      return { success: true, file };
+    } catch (err) {
+      addLog({ level: 'ERROR', source: 'VFS', message: err.message });
+      return { success: false, reason: err.message };
+    }
+  };
+
+  const updateFile = (folder, fileId, newName, pid = null) => {
+    try {
+      const file = fileSystem[folder]?.find((entry) => entry.id === fileId);
+      if (!file) throw new Error(`Archivo no encontrado (id ${fileId}) en ${folder}.`);
+      const updated = syscalls.renameVirtualFile(`${folder}/${file.name}`, newName, authContext, pid);
+      setFileSystem(vfsRef.current.getSnapshot());
+      return { success: true, file: updated };
+    } catch (err) {
+      addLog({ level: 'ERROR', source: 'VFS', message: err.message });
+      return { success: false, reason: err.message };
+    }
+  };
+
+  const deleteFile = (folder, fileId, pid = null) => {
+    try {
+      const file = fileSystem[folder]?.find((entry) => entry.id === fileId);
+      if (!file) throw new Error(`Archivo no encontrado (id ${fileId}) en ${folder}.`);
+      const deleted = syscalls.deleteVirtualFile(`${folder}/${file.name}`, authContext, pid);
+      setFileSystem(vfsRef.current.getSnapshot());
       addLog({
         level: 'WARN',
         source: 'VFS',
-        message: `sys_delete_file: Archivo eliminado en ${folder}: "${res.file.name}".`,
+        message: `sys_delete_file: Archivo eliminado en ${folder}: "${deleted.name}".`,
       });
+      return { success: true, file: deleted };
     } catch (err) {
       addLog({ level: 'ERROR', source: 'VFS', message: err.message });
+      return { success: false, reason: err.message };
     }
   };
 
-  const readFile = (path) => {
-    return syscalls.readFile(path, fileSystem);
+  const readFile = (path, pid = null) => {
+    return syscalls.readVirtualFile(path, authContext, pid);
   };
 
   // ==========================================
@@ -697,7 +1132,7 @@ useEffect(() => {
       payload: { device: 'sensor_temp_01', reason: 'Desconexión del bus I2C' },
     });
 
-    const target = processes.find((p) => p.nombre === 'temp_manager');
+    const target = processManager.getAll().find((p) => p.nombre === 'temp_manager');
     if (!target) {
       addLog({
         level: 'WARN',
@@ -707,12 +1142,19 @@ useEffect(() => {
       return;
     }
 
-    if (target.estado === ESTADOS.NEW) target.admitir();
+    if (target.estado === ESTADOS.NEW) {
+      target.admitir();
+      target.tickLlegada ??= stateRef.current.tickCount;
+      recordProcessStateChange(target, ESTADOS.NEW, ESTADOS.READY, 'ADMITTED');
+    }
     if (target.estado === ESTADOS.READY || target.estado === ESTADOS.RUNNING) {
-      target.pausar();
+      const previousState = target.estado;
+      target.bloquear();
+      recordProcessStateChange(target, previousState, ESTADOS.BLOCKED, 'DEVICE_UNAVAILABLE');
       if (runningProcessId === target.id) {
         setRunningProcessId(null);
         setCurrentCpuUsage(0);
+        stateRef.current = { ...stateRef.current, runningProcessId: null };
       }
     }
     target.color = '#F59E0B';
@@ -783,12 +1225,16 @@ useEffect(() => {
       payload: { reason: '3 intentos erróneos en cerradura', zone: 'Entrada' },
     });
 
-    const target = processes.find((p) => p.nombre === 'surveillance_proc');
+    const target = processManager.getAll().find((p) => p.nombre === 'surveillance_proc');
     if (target) {
       target.prioridad = 1;
       target.priority = 'Crítica';
       target.color = '#EF4444';
-      if (target.estado === ESTADOS.WAITING) target.reanudar();
+      if (target.estado === ESTADOS.BLOCKED || target.estado === ESTADOS.WAITING) {
+        const previousState = target.estado;
+        target.reanudar();
+        recordProcessStateChange(target, previousState, ESTADOS.READY, 'SECURITY_ALERT_RESUME');
+      }
       const started = promoteToRunning(target);
       refreshProcesses();
 
@@ -837,13 +1283,16 @@ useEffect(() => {
         runningProcessId,
         quantumRestante,
         timeline,
+        executionMetrics,
+        comparisonResults,
         playSimulation,
         pauseSimulation,
         stepTick,
         resetSimulation,
         setAlgorithm,
-        setQuantum,
+        setQuantum: configureQuantum,
         setSimulationSpeed,
+        compareSchedulers,
         createProcess,
         executeProcess,
         pauseProcess,
@@ -851,9 +1300,15 @@ useEffect(() => {
         terminateProcess,
         freeMemoryBlock,
         createFile,
+        writeFile,
+        setFilePermissions,
+        createDirectory,
         updateFile,
         deleteFile,
         readFile,
+        listVirtualDirectory: (path) => syscalls.listVirtualDirectory(path, authContext),
+        processDeviceRelations: processManager.getDeviceRelations(),
+        memoryHistory: memoryManager.getHistory(),
         toggleDevice,
         addLog,
         addAlert,

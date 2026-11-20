@@ -1,5 +1,5 @@
 // src/core/memoryManager.js
-// Administrador de memoria física y paginación de RobotOS SmartHouse
+// Administrador de bloques de memoria física de RobotOS SmartHouse
 // Capacidad total: 1024 MB divididos en 64 bloques de 16 MB cada uno.
 // Bloques 0 a 7: Reservados para el Kernel (128 MB, protegidos e inmutables).
 // Bloques 8 a 63: Espacio disponible para procesos de usuario y aplicaciones.
@@ -11,6 +11,7 @@ export const KERNEL_BLOCKS_COUNT = 8; // Bloques 0 a 7
 
 export class MemoryManager {
   constructor(initialBlocks = null) {
+    this.history = [];
     if (initialBlocks && Array.isArray(initialBlocks) && initialBlocks.length === TOTAL_BLOCKS) {
       this.blocks = initialBlocks.map((b) => ({ ...b }));
     } else {
@@ -42,7 +43,7 @@ export class MemoryManager {
   }
 
   getUsedBlocksCount() {
-    return this.blocks.filter((b) => b.state !== 'FREE').length;
+    return this.blocks.filter((b) => b.state === 'ALLOCATED').length;
   }
 
   getKernelBlocksCount() {
@@ -61,7 +62,7 @@ export class MemoryManager {
   /**
    * Asigna bloques contiguos o dispersos a un proceso.
    */
-  allocate(processName, blocksCount, color = '#06B6D4') {
+  allocate(processName, blocksCount, color = '#06B6D4', ownerPid = null) {
     const requested = Number(blocksCount);
     if (!Number.isInteger(requested) || requested <= 0) {
       throw new Error(`Cantidad de bloques inválida para asignación: ${blocksCount}`);
@@ -85,42 +86,71 @@ export class MemoryManager {
           ...b,
           state: 'ALLOCATED',
           processName: cleanName,
+          ownerPid,
           color,
         };
       }
       return b;
     });
 
-    return {
+    const result = {
       success: true,
       allocatedBlocks: requested,
       allocatedMB: requested * BLOCK_SIZE_MB,
       blockIds: allocatedIndices,
       freeBlocksRemaining: this.getFreeBlocksCount(),
     };
+    this.history.push({
+      type: 'MEMORY_ALLOCATED',
+      pid: Number.isInteger(ownerPid) ? ownerPid : null,
+      processName: cleanName,
+      blockIds: [...allocatedIndices],
+      allocatedBlocks: requested,
+      allocatedMB: requested * BLOCK_SIZE_MB,
+      timestamp: new Date().toISOString(),
+    });
+    return result;
   }
 
   /**
    * Libera todos los bloques asociados a un proceso específico.
    */
-  freeProcessMemory(processName) {
-    if (!processName) return 0;
-    const cleanName = String(processName).trim();
+  freeProcessMemory(processIdentifier) {
+    if (processIdentifier === null || processIdentifier === undefined || processIdentifier === '') return 0;
+    const byPid = Number.isInteger(processIdentifier);
+    const cleanName = byPid ? null : String(processIdentifier).trim();
     let freedCount = 0;
+    const freedBlockIds = [];
 
     this.blocks = this.blocks.map((b) => {
-      if (b.state === 'ALLOCATED' && b.processName === cleanName) {
+      if (
+        b.state === 'ALLOCATED' &&
+        (byPid ? b.ownerPid === processIdentifier : b.processName === cleanName)
+      ) {
         freedCount += 1;
+        freedBlockIds.push(b.id);
         return {
           ...b,
           state: 'FREE',
           processName: null,
+          ownerPid: null,
           color: '#1E293B',
         };
       }
       return b;
     });
 
+    if (freedCount > 0) {
+      this.history.push({
+        type: 'MEMORY_RELEASED',
+        pid: byPid ? processIdentifier : null,
+        processName: cleanName,
+        blockIds: freedBlockIds,
+        freedBlocks: freedCount,
+        freedMB: freedCount * BLOCK_SIZE_MB,
+        timestamp: new Date().toISOString(),
+      });
+    }
     return freedCount;
   }
 
@@ -148,10 +178,25 @@ export class MemoryManager {
     }
 
     this.blocks = this.blocks.map((b) =>
-      b.id === id ? { ...b, state: 'FREE', processName: null, color: '#1E293B' } : b
+      b.id === id
+        ? { ...b, state: 'FREE', processName: null, ownerPid: null, color: '#1E293B' }
+        : b
     );
 
+    this.history.push({
+      type: 'MEMORY_RELEASED',
+      pid: target.ownerPid ?? null,
+      processName: target.processName,
+      blockIds: [id],
+      freedBlocks: 1,
+      freedMB: BLOCK_SIZE_MB,
+      timestamp: new Date().toISOString(),
+    });
     return { success: true, freedBlockId: id, freeBlocksCount: this.getFreeBlocksCount() };
+  }
+
+  getHistory() {
+    return this.history.map((entry) => ({ ...entry, blockIds: [...entry.blockIds] }));
   }
 
   /**

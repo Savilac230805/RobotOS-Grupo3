@@ -6,15 +6,17 @@ export const ESTADOS = Object.freeze({
   NEW: 'NEW', // recién creado, todavía no entra al sistema
   READY: 'READY', // listo, esperando su turno en la CPU
   RUNNING: 'RUNNING', // usando la CPU en este momento
+  BLOCKED: 'BLOCKED', // esperando un recurso o evento externo
   WAITING: 'WAITING', // pausado o esperando algo
   TERMINATED: 'TERMINATED', // terminó, no puede volver a empezar
 });
 
 export const TRANSICIONES_PERMITIDAS = Object.freeze({
   NEW: ['READY', 'TERMINATED'],
-  READY: ['RUNNING', 'WAITING', 'TERMINATED'],
-  RUNNING: ['READY', 'WAITING', 'TERMINATED'],
-  WAITING: ['READY', 'TERMINATED'],
+  READY: ['RUNNING', 'BLOCKED', 'WAITING', 'TERMINATED'],
+  RUNNING: ['READY', 'BLOCKED', 'WAITING', 'TERMINATED'],
+  BLOCKED: ['READY', 'TERMINATED'],
+  WAITING: ['READY', 'BLOCKED', 'TERMINATED'],
   TERMINATED: [],
 });
 
@@ -49,6 +51,8 @@ export class Proceso {
     color = null,
     isSystem = false,
     description = '',
+    deviceIds = [],
+    tickLlegada = null,
   }) {
     if (typeof nombre !== 'string' || nombre.trim() === '') {
       throw new Error('El nombre es obligatorio');
@@ -78,6 +82,8 @@ export class Proceso {
     this.isSystem = Boolean(isSystem);
     this.description = description || `Proceso ${this.nombre} (PID ${this.pid})`;
     this.creadoEn = new Date();
+    this.deviceIds = [...new Set(deviceIds)];
+    this.tickLlegada = Number.isFinite(tickLlegada) ? tickLlegada : null;
   }
 
   cambiarEstado(nuevoEstado) {
@@ -105,6 +111,10 @@ export class Proceso {
 
   pausar() {
     this.cambiarEstado(ESTADOS.WAITING);
+  }
+
+  bloquear() {
+    this.cambiarEstado(ESTADOS.BLOCKED);
   }
 
   reanudar() {
@@ -136,6 +146,8 @@ export class Proceso {
       color: this.color,
       isSystem: this.isSystem,
       description: this.description,
+      deviceIds: [...this.deviceIds],
+      tickLlegada: this.tickLlegada,
       creadoEn: this.creadoEn.toISOString(),
     };
   }

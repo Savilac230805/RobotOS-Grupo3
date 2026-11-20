@@ -4,14 +4,85 @@ import { useAuth } from '../context/AuthContext';
 import { memoryManager } from '../core';
 
 export const MemoryPage = () => {
-  const { memoryBlocks, fileSystem, freeMemoryBlock, addLog } = useSystem();
+  const {
+    memoryBlocks,
+    fileSystem,
+    freeMemoryBlock,
+    memoryHistory,
+    createFile,
+    writeFile,
+    setFilePermissions,
+    createDirectory,
+    deleteFile,
+    readFile,
+    addLog,
+  } = useSystem();
   const { role, checkPermission } = useAuth();
 
   const [selectedFolder, setSelectedFolder] = useState('/system');
+  const [newDirectoryName, setNewDirectoryName] = useState('');
+  const [newFileName, setNewFileName] = useState('');
+  const [fileContent, setFileContent] = useState('');
+  const [filePermissions, setFilePermissionsState] = useState(role === 'ADMIN' ? 'rw-r--r--' : 'rw-rw-rw-');
+  const [activeFileId, setActiveFileId] = useState(null);
+  const [vfsFeedback, setVfsFeedback] = useState('');
 
   const rootFolders = Object.keys(fileSystem);
+  const activeFile = fileSystem[selectedFolder]?.find((file) => file.id === activeFileId);
 
   const memStats = memoryManager.getStats();
+
+  const handleCreateDirectory = () => {
+    const path = `${selectedFolder}/${newDirectoryName.trim()}`;
+    const result = createDirectory(path);
+    setVfsFeedback(result?.success === false ? result.reason : `Directorio ${path} creado.`);
+    if (result?.success !== false) setNewDirectoryName('');
+  };
+
+  const handleCreateFile = () => {
+    const result = createFile(selectedFolder, {
+      name: newFileName.trim(),
+      content: fileContent,
+      permissions: filePermissions,
+    });
+    setVfsFeedback(result?.success === false ? result.reason : `Archivo ${newFileName.trim()} creado.`);
+    if (result?.success) {
+      setActiveFileId(result.file.id);
+      setNewFileName('');
+    }
+  };
+
+  const handleReadFile = (file) => {
+    try {
+      const result = readFile(`${selectedFolder}/${file.name}`);
+      setActiveFileId(file.id);
+      setFileContent(result.content);
+      setVfsFeedback(`Leído ${selectedFolder}/${file.name}`);
+    } catch (error) {
+      setVfsFeedback(error.message);
+    }
+  };
+
+  const handleWriteFile = () => {
+    if (!activeFile) return;
+    const result = writeFile(`${selectedFolder}/${activeFile.name}`, fileContent);
+    setVfsFeedback(result?.success === false ? result.reason : `Archivo ${activeFile.name} actualizado.`);
+  };
+
+  const handlePermissionsChange = (permissions) => {
+    if (!activeFile) return;
+    const result = setFilePermissions(`${selectedFolder}/${activeFile.name}`, permissions);
+    setVfsFeedback(result?.success === false ? result.reason : `Permisos actualizados: ${permissions}`);
+  };
+
+  const handleDeleteFile = (file) => {
+    const result = deleteFile(selectedFolder, file.id);
+    setVfsFeedback(result?.success === false ? result.reason : `Archivo ${file.name} eliminado.`);
+    if (file.id === activeFileId) {
+      setActiveFileId(null);
+      setFileContent('');
+    }
+  };
 
   const handleFreeBlockClick = (block) => {
     if (block.state === 'FREE') return;
@@ -82,7 +153,7 @@ export const MemoryPage = () => {
           <div>
             <h3 className="text-sm font-bold text-white tracking-wide">Mapa Físico de Bloques de Memoria</h3>
             <p className="text-xs text-slate-400">
-              Representación visual de la paginación física en tiempo real. Pulsa en un bloque para liberarlo vía syscall.
+              Representación de la asignación física en tiempo real. Pulsa en un bloque de usuario para liberarlo vía syscall.
             </p>
           </div>
 
@@ -128,8 +199,38 @@ export const MemoryPage = () => {
                   {isKernel ? 'KERNEL' : isAllocated ? block.processName : 'LIBRE'}
                 </div>
               </div>
+
             );
           })}
+        </div>
+      </div>
+
+      <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 shadow-lg">
+        <h3 className="text-sm font-bold text-white mb-3">Historial de memoria</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs font-mono">
+            <thead className="text-slate-500 uppercase text-[10px]">
+              <tr>
+                <th className="py-2 pr-3">Operación</th>
+                <th className="py-2 pr-3">PID / proceso</th>
+                <th className="py-2 pr-3">Bloques</th>
+                <th className="py-2">Hora</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/60">
+              {[...memoryHistory].reverse().slice(-10).reverse().map((entry, index) => (
+                <tr key={`${entry.timestamp}_${index}`} className="text-slate-400">
+                  <td className="py-2 pr-3 text-cyan-300">{entry.type}</td>
+                  <td className="py-2 pr-3">{entry.pid ?? entry.processName ?? '—'}</td>
+                  <td className="py-2 pr-3">{entry.blockIds.join(', ')}</td>
+                  <td className="py-2">{new Date(entry.timestamp).toLocaleTimeString()}</td>
+                </tr>
+              ))}
+              {memoryHistory.length === 0 && (
+                <tr><td className="py-3 text-slate-600" colSpan={4}>Sin asignaciones registradas.</td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -167,6 +268,87 @@ export const MemoryPage = () => {
           })}
         </div>
 
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="flex gap-2">
+            <input
+              value={newDirectoryName}
+              onChange={(event) => setNewDirectoryName(event.target.value)}
+              placeholder="Nuevo directorio"
+              className="min-w-0 flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white"
+            />
+            <button
+              type="button"
+              onClick={handleCreateDirectory}
+              disabled={!newDirectoryName.trim()}
+              className="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-xs text-cyan-300 disabled:opacity-40"
+            >
+              Crear carpeta
+            </button>
+          </div>
+          <div className="flex gap-2">
+            <input
+              value={newFileName}
+              onChange={(event) => setNewFileName(event.target.value)}
+              placeholder="Nuevo archivo"
+              className="min-w-0 flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white"
+            />
+            <button
+              type="button"
+              onClick={handleCreateFile}
+              disabled={!newFileName.trim()}
+              className="px-3 py-2 rounded-lg bg-cyan-700 border border-cyan-600 text-xs text-white disabled:opacity-40"
+            >
+              Crear archivo
+            </button>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <label htmlFor="vfs-permissions" className="text-[10px] uppercase font-mono text-slate-500">
+            Permisos de nuevos archivos
+          </label>
+          <select
+            id="vfs-permissions"
+            value={filePermissions}
+            onChange={(event) => setFilePermissionsState(event.target.value)}
+            className="px-2 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-cyan-300"
+          >
+            <option value="rw-r--r--">Privado lectura</option>
+            <option value="rw-rw-r--">Grupo escritura</option>
+            <option value="rw-rw-rw-">Lectura y escritura pública</option>
+            <option value="r--r--r--">Solo lectura</option>
+          </select>
+        </div>
+        {activeFile && (
+          <div className="space-y-2">
+            <div className="text-xs font-mono text-cyan-300">Editando: {selectedFolder}/{activeFile.name}</div>
+            <textarea
+              value={fileContent}
+              onChange={(event) => setFileContent(event.target.value)}
+              rows={3}
+              className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white font-mono"
+            />
+            <button
+              type="button"
+              onClick={handleWriteFile}
+              className="px-3 py-2 rounded-lg bg-emerald-800 border border-emerald-700 text-xs text-white"
+            >
+              Guardar cambios
+            </button>
+            <select
+              value={activeFile.permissions}
+              onChange={(event) => handlePermissionsChange(event.target.value)}
+              className="ml-2 px-2 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-cyan-300"
+              aria-label="Cambiar permisos del archivo"
+            >
+              <option value="rw-r--r--">rw-r--r--</option>
+              <option value="rw-rw-r--">rw-rw-r--</option>
+              <option value="rw-rw-rw-">rw-rw-rw-</option>
+              <option value="r--r--r--">r--r--r--</option>
+            </select>
+          </div>
+        )}
+        {vfsFeedback && <div className="text-xs font-mono text-slate-400">{vfsFeedback}</div>}
+
         {/* Lista de Archivos */}
         <div className="overflow-x-auto pt-2">
           <table className="w-full text-left text-xs font-mono">
@@ -176,6 +358,7 @@ export const MemoryPage = () => {
                 <th className="py-2.5 px-3">Tamaño</th>
                 <th className="py-2.5 px-3">Permisos</th>
                 <th className="py-2.5 px-3">Modificado</th>
+                <th className="py-2.5 px-3">Operaciones</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
@@ -188,6 +371,12 @@ export const MemoryPage = () => {
                   <td className="py-2.5 px-3 text-slate-400">{file.size}</td>
                   <td className="py-2.5 px-3 text-cyan-400/80">{file.permissions}</td>
                   <td className="py-2.5 px-3 text-slate-500">{file.modified}</td>
+                  <td className="py-2.5 px-3">
+                    <div className="flex gap-2">
+                      <button type="button" onClick={() => handleReadFile(file)} className="text-cyan-300 hover:text-white">Leer</button>
+                      <button type="button" onClick={() => handleDeleteFile(file)} className="text-red-400 hover:text-red-300">Eliminar</button>
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
