@@ -8,6 +8,8 @@ const SMART_HOME_PROCESS_DEVICES = Object.freeze({
   security_daemon: ['d3', 'd4', 'd5'],
   energy_monitor: ['d1', 'd2', 'd6'],
   energy_manager: ['d1', 'd2', 'd6'],
+  garbage_collector_daemon: ['d10'],
+  irrigation_daemon: ['d11'],
 });
 
 export class ProcessManager {

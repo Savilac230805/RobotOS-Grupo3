@@ -15,13 +15,21 @@ import { inMemoryAdapter } from './persistence/InMemoryPersistenceAdapter.js';
 import { memoryManager } from './memoryManager.js';
 import { Proceso, ESTADOS } from './proceso.js';
 import { processManager } from './processManager.js';
+import { driverManager } from './drivers/driverManager.js';
 
 export class SystemCalls {
-  constructor(events = eventEngine, persistence = inMemoryAdapter, memory = memoryManager, manager = null) {
+  constructor(
+    events = eventEngine,
+    persistence = inMemoryAdapter,
+    memory = memoryManager,
+    manager = null,
+    driverMgr = driverManager
+  ) {
     this.events = events;
     this.persistence = persistence;
     this.memory = memory;
     this.processManager = manager;
+    this.driverManager = driverMgr;
     this.vfs = null;
     this.memory.setEventPublisher?.((event) => this.emitEvent(event));
   }
@@ -124,33 +132,52 @@ export class SystemCalls {
    *   (la memoria se asigna por nombre, así que dos procesos con el mismo nombre
    *   compartirían bloques al terminar).
    */
-  createProcess(
-    {
-      name,
-      priority = 'Media',
-      memoryBlocksCount = 2,
-      cpu = 10,
-      tiempoTotal = 4,
-      color = null,
-      deviceIds = [],
-      tickLlegada = null,
-      existingProcesses = [],
-      virtualSizeMB = undefined,
-    },
-    context = {}
-  ) {
-    if (!name || typeof name !== 'string' || name.trim() === '') {
+  /**
+   * Syscall: sys_create_process
+   * Crea un proceso de usuario o de sistema en el Kernel.
+   * Soporta de forma canónica parámetros bajo 'name', 'nombre', 'processName', 'process_name',
+   * 'payload.name' o string directo.
+   */
+  createProcess(rawParams = {}, context = {}) {
+    // 1. Extraer nombre tolerando cualquier formato común de interfaz o payload
+    const rawName =
+      typeof rawParams === 'string'
+        ? rawParams
+        : rawParams?.name ??
+          rawParams?.nombre ??
+          rawParams?.processName ??
+          rawParams?.process_name ??
+          rawParams?.payload?.name ??
+          rawParams?.formData?.name ??
+          '';
+
+    if (!rawName || typeof rawName !== 'string' || rawName.trim() === '') {
       throw new Error('[Syscall sys_create_process] El nombre del proceso no puede estar vacío.');
     }
 
-    const cleanName = name.trim().toLowerCase().replace(/\s+/g, '_');
-    const requestedBlocks = Number(memoryBlocksCount);
+    const cleanName = rawName.trim().toLowerCase().replace(/\s+/g, '_');
+
+    // 2. Extraer y validar bloques de memoria requeridos
+    const requestedBlocks = Number(
+      typeof rawParams === 'object' && rawParams !== null
+        ? rawParams.memoryBlocksCount ??
+          rawParams.bloquesMemoria ??
+          rawParams.memoryBlocks ??
+          rawParams.memory ??
+          2
+        : 2
+    );
+
     if (!Number.isInteger(requestedBlocks) || requestedBlocks <= 0) {
       throw new Error('[Syscall sys_create_process] Cantidad de bloques de memoria inválida.');
     }
 
+    const existingProcesses = Array.isArray(rawParams?.existingProcesses)
+      ? rawParams.existingProcesses
+      : this.processManager?.getAll?.() || [];
+
     const duplicado = existingProcesses.some(
-      (p) => p.nombre === cleanName && p.estado !== ESTADOS.TERMINATED
+      (p) => (p.nombre === cleanName || p.name === cleanName) && p.estado !== ESTADOS.TERMINATED
     );
     if (duplicado) {
       throw new Error(
@@ -158,20 +185,45 @@ export class SystemCalls {
       );
     }
 
-    // 2. Mapear prioridad textual a entera (1 = más urgente)
+    // 3. Mapear prioridad textual a entera (1 = más urgente)
+    const rawPriority =
+      typeof rawParams === 'object' && rawParams !== null
+        ? rawParams.priority ?? rawParams.prioridad ?? 'Media'
+        : 'Media';
+
     const priorityNum =
-      priority === 'Crítica' || priority === 1
+      rawPriority === 'Crítica' || rawPriority === 1
         ? 1
-        : priority === 'Alta' || priority === 2
+        : rawPriority === 'Alta' || rawPriority === 2
         ? 2
-        : priority === 'Media' || priority === 3
+        : rawPriority === 'Media' || rawPriority === 3
         ? 3
+        : typeof rawPriority === 'number' && Number.isInteger(rawPriority) && rawPriority > 0
+        ? rawPriority
         : 4;
+
+    const cpu = Number(
+      (typeof rawParams === 'object' && rawParams !== null && (rawParams.cpu ?? rawParams.cpuRequerida)) || 10
+    );
+    const tiempoTotal = Number(
+      (typeof rawParams === 'object' && rawParams !== null && (rawParams.tiempoTotal ?? rawParams.duration ?? rawParams.tiempo)) || 4
+    );
+    const color = (typeof rawParams === 'object' && rawParams !== null && rawParams.color) || null;
+    const deviceIds =
+      typeof rawParams === 'object' && rawParams !== null
+        ? Array.isArray(rawParams.deviceIds)
+          ? rawParams.deviceIds
+          : Array.isArray(rawParams.devices)
+          ? rawParams.devices
+          : []
+        : [];
+    const tickLlegada = typeof rawParams === 'object' && rawParams !== null ? rawParams.tickLlegada ?? null : null;
+    const virtualSizeMB = typeof rawParams === 'object' && rawParams !== null ? rawParams.virtualSizeMB : undefined;
 
     let newProc;
     let memResult;
     try {
-      // 3. Crear PCB formal
+      // 4. Crear PCB formal
       newProc = new Proceso({
         nombre: cleanName,
         prioridad: priorityNum,
@@ -179,7 +231,7 @@ export class SystemCalls {
         cpuRequerida: Number(cpu) || 10,
         tiempoTotal: Number(tiempoTotal) || 4,
         color: color || '#06B6D4',
-        isSystem: false,
+        isSystem: Boolean(rawParams?.isSystem),
         description: `Proceso creado vía sys_create_process (${context?.role || 'ANÓNIMO'})`,
         deviceIds,
         tickLlegada,
@@ -191,7 +243,7 @@ export class SystemCalls {
       });
       this.processManager?.register(newProc);
 
-      // 4. Emitir evento auditable
+      // 5. Emitir eventos auditables
       this.emitEvent({
         type: 'PROCESS_CREATED',
         source: EVENT_SOURCES.PROCESS_MGR,
@@ -231,9 +283,23 @@ export class SystemCalls {
       throw err;
     }
 
-    // 5. Persistir (el adaptador dirige a sandbox o a almacenamiento compartido según el modo activo)
+    // 6. Persistir (el adaptador dirige a sandbox o a almacenamiento compartido según el modo activo)
     this.persist('saveProcess', newProc);
     return { success: true, process: newProc, memory: memResult };
+  }
+
+  /**
+   * Alias canónico para sys_create_process
+   */
+  sys_create_process(params, context) {
+    return this.createProcess(params, context);
+  }
+
+  /**
+   * Alias canónico para sys_terminate_process
+   */
+  sys_terminate_process(processId, context, processesList = []) {
+    return this.terminateProcess(processId, context, processesList);
   }
 
   /**
@@ -604,8 +670,126 @@ export class SystemCalls {
   }
 
   // ==========================================
-  // SYSCALLS DE DISPOSITIVOS
+  // SYSCALLS DE DISPOSITIVOS & HARDWARE DRIVERS (HAL)
+  // Arquitectura: Proceso -> Syscall -> Driver -> Dispositivo -> Event Engine -> Supabase
   // ==========================================
+
+  /**
+   * Syscall: sys_access_device
+   * Control formal de dispositivos a través de sus Drivers de hardware especializados.
+   * Valida estado del proceso controlador: si está BLOCKED, WAITING o TERMINATED, rechaza y emite evento.
+   */
+  accessDevice({ deviceId, action = 'TOGGLE', payload = {} }, context = {}, devicesList = [], processesList = []) {
+    if (!deviceId) throw new Error('[Syscall accessDevice] El parámetro deviceId es obligatorio.');
+
+    const dev = devicesList.find((d) => d.id === deviceId);
+    if (!dev) throw new Error(`Dispositivo no encontrado: ${deviceId}`);
+
+    const driver = this.driverManager ? this.driverManager.getDriver(dev.type) : null;
+    if (!driver) throw new Error(`Driver no registrado para dispositivo de tipo "${dev.type}" (${dev.name}).`);
+
+    // 1. REGLA FUNDAMENTAL: si el proceso asociado está BLOCKED, WAITING o TERMINATED, rechaza
+    const procCheck = driver.checkProcessState(processesList);
+    if (!procCheck.ok) {
+      this.emitEvent({
+        type: 'DEVICE_OPERATION_REJECTED',
+        source: EVENT_SOURCES.HARDWARE_BUS || 'HARDWARE_BUS',
+        severity: EVENT_SEVERITY.WARN,
+        pid: procCheck.process?.pid || null,
+        payload: {
+          deviceId: dev.id,
+          deviceName: dev.name,
+          action,
+          driver: driver.name,
+          associatedProcess: driver.associatedProcessName,
+          processState: procCheck.processState,
+          reason: procCheck.reason,
+        },
+      });
+      throw new Error(procCheck.reason);
+    }
+
+    // 2. Validar permisos del driver
+    const permCheck = driver.validatePermissions(action, context, dev);
+    if (!permCheck.ok) {
+      this.emitEvent({
+        type: 'SECURITY_VIOLATION',
+        source: EVENT_SOURCES.SECURITY_GUARD,
+        severity: EVENT_SEVERITY.WARN,
+        pid: procCheck.process?.pid || null,
+        payload: {
+          deviceId: dev.id,
+          deviceName: dev.name,
+          action,
+          reason: permCheck.reason,
+        },
+      });
+      throw new Error(permCheck.reason);
+    }
+
+    // 3. Ejecutar acción a través del Driver
+    const previous = dev.status;
+    const result = driver.execute(action, payload, { device: dev, processesList, context });
+
+    // 4. Actualizar estado del dispositivo
+    dev.status = result.nextStatus;
+    if (result.extra) {
+      Object.assign(dev, result.extra);
+    }
+
+    // 5. Emitir evento estructurado de dominio (LIGHT_ON, DOORBELL_PRESSED, etc.)
+    const event = this.emitEvent({
+      type: result.eventType,
+      source: EVENT_SOURCES.IOT_MANAGER,
+      severity: result.severity || EVENT_SEVERITY.INFO,
+      pid: procCheck.process?.pid || null,
+      payload: {
+        deviceId: dev.id,
+        name: dev.name,
+        action,
+        driver: driver.name,
+        previous,
+        current: result.nextStatus,
+        zone: dev.zone,
+        role: context?.role || 'GUEST',
+        ...result.payload,
+      },
+    });
+
+    // 6. Emitir también DEVICE_STATE_CHANGED para telemetría general
+    this.emitEvent({
+      type: 'DEVICE_STATE_CHANGED',
+      source: EVENT_SOURCES.IOT_MANAGER,
+      severity: EVENT_SEVERITY.INFO,
+      pid: procCheck.process?.pid || null,
+      payload: {
+        deviceId: dev.id,
+        name: dev.name,
+        previous,
+        current: result.nextStatus,
+        zone: dev.zone,
+        role: context?.role || 'GUEST',
+      },
+    });
+
+    // 7. Persistir estado del dispositivo
+    this.persist('saveDeviceState', dev.id, dev.status, { name: dev.name, zone: dev.zone, type: dev.type, ...result.extra });
+
+    return {
+      success: true,
+      device: dev,
+      event,
+      eventType: result.eventType,
+      driver: driver.name,
+      previous,
+      current: dev.status,
+    };
+  }
+
+  getDriversTelemetry(devicesList = [], processesList = []) {
+    return this.driverManager ? this.driverManager.getDriversTelemetry(devicesList, processesList) : [];
+  }
+
   deviceRead(deviceId, devicesList) {
     const dev = devicesList.find((d) => d.id === deviceId);
     if (!dev) throw new Error(`Dispositivo no encontrado: ${deviceId}`);
@@ -620,9 +804,14 @@ export class SystemCalls {
     return dev;
   }
 
-  deviceWrite(deviceId, nextStatus, devicesList, context = {}) {
+  deviceWrite(deviceId, nextStatus, devicesList, context = {}, processesList = []) {
     const dev = devicesList.find((d) => d.id === deviceId);
     if (!dev) throw new Error(`Dispositivo no encontrado: ${deviceId}`);
+
+    // Si hay un driver registrado y se pasaron procesos, canalizar a través de accessDevice
+    if (this.driverManager && this.driverManager.getDriver(dev.type) && Array.isArray(processesList) && processesList.length > 0) {
+      return this.accessDevice({ deviceId, action: nextStatus }, context, devicesList, processesList).device;
+    }
 
     const previous = dev.status;
     dev.status = nextStatus;
@@ -641,9 +830,15 @@ export class SystemCalls {
       },
     });
 
-    this.persist('saveDeviceState', deviceId, nextStatus, { name: dev.name, zone: dev.zone });
+    this.persist('saveDeviceState', deviceId, nextStatus, { name: dev.name, zone: dev.zone, type: dev.type });
     return dev;
   }
 }
 
-export const syscalls = new SystemCalls(eventEngine, inMemoryAdapter, memoryManager, processManager);
+export const syscalls = new SystemCalls(
+  eventEngine,
+  inMemoryAdapter,
+  memoryManager,
+  processManager,
+  driverManager
+);

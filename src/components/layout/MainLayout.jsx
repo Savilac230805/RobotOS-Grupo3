@@ -5,7 +5,7 @@ import { DeniedModal } from '../common/DeniedModal';
 
 export const MainLayout = ({ currentScreen, onNavigate, children }) => {
   return (
-    <div className="flex min-h-screen bg-slate-950 text-slate-100">
+    <div className="flex min-h-screen bg-slate-950 text-slate-100 transition-colors duration-300">
       {/* Sidebar fijo a la izquierda */}
       <Sidebar currentScreen={currentScreen} onNavigate={onNavigate} />
 

@@ -327,7 +327,7 @@ test('EventEngine: emite evento respetando el esquema JSON fijo exigido', () => 
     payload: { deviceId: 'd1', status: 'ON' },
   });
 
-  assert.ok(event.id.startsWith('evt_'));
+  assert.match(event.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   assert.ok(event.timestamp);
   assert.equal(event.source, 'IOT_MANAGER');
   assert.equal(event.type, 'DEVICE_STATE_CHANGED');

@@ -60,24 +60,29 @@ export const ProcessesPage = () => {
     e.preventDefault();
     setFormFeedback(null);
 
-    if (!name.trim()) {
+    const trimmedName = typeof name === 'string' ? name.trim() : '';
+    if (!trimmedName) {
       setFormFeedback({ type: 'error', message: 'El nombre del proceso no puede estar vacío.' });
       return;
     }
 
     const res = createProcess({
-      name,
+      name: trimmedName,
+      nombre: trimmedName,
+      processName: trimmedName,
       priority,
-      memoryBlocksCount: Number(memoryBlocksCount),
-      cpu: Number(cpu),
+      memoryBlocksCount: Number(memoryBlocksCount) || 2,
+      cpu: Number(cpu) || 15,
       tiempoTotal: Number(tiempoTotal) || 4,
       deviceIds,
     });
 
-    if (res.success) {
+    if (res && res.success) {
+      const p = res.process;
+      const memCount = p.memoryBlocks || (Array.isArray(p.bloquesAsignados) ? p.bloquesAsignados.length : 2);
       setFormFeedback({
         type: 'success',
-        message: `Proceso "${res.process.nombre}" (PID ${res.process.pid}) creado en estado NEW con ${res.process.memoryBlocks} bloques y ${res.process.tiempoTotal} ticks de duración.`,
+        message: `Proceso "${p.nombre}" (PID ${p.pid}) creado en estado NEW con ${memCount} bloques y ${p.tiempoTotal} ticks de duración.`,
       });
       setName('');
       setMemoryBlocksCount(2);
@@ -87,7 +92,7 @@ export const ProcessesPage = () => {
     } else {
       setFormFeedback({
         type: 'error',
-        message: res.reason || 'No se pudo crear el proceso. Revisa la bandeja de alertas.',
+        message: res?.reason || 'No se pudo crear el proceso. Revisa la bandeja de alertas.',
       });
     }
   };

@@ -91,31 +91,44 @@ export const SystemProvider = ({ children }) => {
   // El adaptador se inyecta en el singleton syscalls para que todos los eventos
   // emitidos desde cualquier punto del kernel lleguen al medio correcto.
   // ==========================================
- const [syncStatus, setSyncStatus] = useState(
-  isSupabaseConfigured ? SYNC_STATUS.IDLE : SYNC_STATUS.OFFLINE
-);
+  const [syncStatus, setSyncStatus] = useState(
+    isSupabaseConfigured ? SYNC_STATUS.IDLE : SYNC_STATUS.OFFLINE
+  );
+  const [syncMetrics, setSyncMetrics] = useState({
+    status: isSupabaseConfigured ? SYNC_STATUS.IDLE : SYNC_STATUS.OFFLINE,
+    queueSize: 0,
+    pendingCount: 0,
+    failedCount: 0,
+    totalSynced: 0,
+    lastSyncedEvent: null,
+    avgLatencyMs: 0,
+    lastLatencyMs: 0,
+    origin: 'sandbox',
+  });
 
-const persistenceAdapterRef = useRef(inMemoryAdapter);
-const supabaseAdapterRef = useRef(null);
+  const persistenceAdapterRef = useRef(inMemoryAdapter);
+  const supabaseAdapterRef = useRef(null);
 
-// Se elige el adaptador UNA sola vez: Supabase para todos si está configurado.
-// El adaptador decide solo si cada evento va como 'sandbox' o 'admin'.
-useEffect(() => {
-  if (isSupabaseConfigured) {
-    if (!supabaseAdapterRef.current) {
-      supabaseAdapterRef.current = new SupabasePersistenceAdapter(supabase, {
-        fallback: inMemoryAdapter,
-      });
+  // Se elige el adaptador UNA sola vez: Supabase para todos si está configurado.
+  // El adaptador decide solo si cada evento va como 'sandbox' o 'admin'.
+  useEffect(() => {
+    if (isSupabaseConfigured) {
+      if (!supabaseAdapterRef.current) {
+        supabaseAdapterRef.current = new SupabasePersistenceAdapter(supabase, {
+          fallback: inMemoryAdapter,
+        });
+      }
+      persistenceAdapterRef.current = supabaseAdapterRef.current;
+      syscalls.persistence = supabaseAdapterRef.current;
+      setSyncStatus(supabaseAdapterRef.current.getSyncStatus());
+      setSyncMetrics(supabaseAdapterRef.current.getSyncMetrics());
+    } else {
+      inMemoryAdapter.setSandboxMode(true);
+      persistenceAdapterRef.current = inMemoryAdapter;
+      syscalls.persistence = inMemoryAdapter;
+      setSyncStatus(SYNC_STATUS.OFFLINE);
+      setSyncMetrics({ status: SYNC_STATUS.OFFLINE, queueSize: 0, origin: 'sandbox' });
     }
-    persistenceAdapterRef.current = supabaseAdapterRef.current;
-    syscalls.persistence = supabaseAdapterRef.current;
-    setSyncStatus(supabaseAdapterRef.current.getSyncStatus());
-  } else {
-    inMemoryAdapter.setSandboxMode(true);
-    persistenceAdapterRef.current = inMemoryAdapter;
-    syscalls.persistence = inMemoryAdapter;
-    setSyncStatus(SYNC_STATUS.OFFLINE);
-  }
 
   if (!initialProcessEventsPersisted) {
     initialProcessEventsPersisted = true;
@@ -146,7 +159,10 @@ useEffect(() => {
     }
   }
 
-  const handleSyncEvent = (e) => setSyncStatus(e.detail.status);
+  const handleSyncEvent = (e) => {
+    setSyncStatus(e.detail.status);
+    setSyncMetrics((prev) => ({ ...prev, ...e.detail }));
+  };
   window.addEventListener('robotos:sync', handleSyncEvent);
   return () => window.removeEventListener('robotos:sync', handleSyncEvent);
 }, []);
@@ -650,6 +666,8 @@ bootManager.executeBoot().then((res) => {
       message,
     };
     setLogs((prev) => [newLogEntry, ...prev.slice(0, 99)]);
+    // Persistir en Supabase (y en memoria como respaldo)
+    Promise.resolve(persistenceAdapterRef.current.saveLog(newLogEntry)).catch(() => {});
     inMemoryAdapter.saveLog(newLogEntry).catch(() => {});
   };
 
@@ -669,6 +687,16 @@ bootManager.executeBoot().then((res) => {
       source: 'ALERT_DAEMON',
       message: `[ALERTA EMITIDA] ${title}: ${details}`,
     });
+
+    // Persistir alerta directamente en la tabla alerts de Supabase
+    Promise.resolve(persistenceAdapterRef.current.saveAlert({
+      ...newAlert,
+      severity: severity === 'critical' ? 'CRITICAL'
+        : severity === 'error' ? 'HIGH'
+        : severity === 'warning' ? 'MEDIUM'
+        : 'LOW',
+      state: 'ACTIVE',
+    })).catch(() => {});
 
     safeEmit({
       type: 'ALERT_RAISED',
@@ -702,15 +730,52 @@ bootManager.executeBoot().then((res) => {
   // Ninguna acción con efectos secundarios (logs, eventos, syscalls)
   // se ejecuta dentro de un setState(prev => ...): StrictMode los llama dos veces.
   // ==========================================
-  const createProcess = ({
-    name,
-    priority = 'Media',
-    memoryBlocksCount = 2,
-    cpu = 10,
-    tiempoTotal = 4,
-    deviceIds = [],
-  }) => {
+  const createProcess = (rawParams = {}) => {
     try {
+      const name =
+        typeof rawParams === 'string'
+          ? rawParams
+          : rawParams?.name ??
+            rawParams?.nombre ??
+            rawParams?.processName ??
+            rawParams?.process_name ??
+            rawParams?.payload?.name ??
+            rawParams?.formData?.name ??
+            '';
+
+      const priority =
+        typeof rawParams === 'object' && rawParams !== null
+          ? rawParams.priority ?? rawParams.prioridad ?? 'Media'
+          : 'Media';
+
+      const memoryBlocksCount =
+        typeof rawParams === 'object' && rawParams !== null
+          ? rawParams.memoryBlocksCount ??
+            rawParams.bloquesMemoria ??
+            rawParams.memoryBlocks ??
+            rawParams.memory ??
+            2
+          : 2;
+
+      const cpu =
+        typeof rawParams === 'object' && rawParams !== null
+          ? rawParams.cpu ?? rawParams.cpuRequerida ?? 10
+          : 10;
+
+      const tiempoTotal =
+        typeof rawParams === 'object' && rawParams !== null
+          ? rawParams.tiempoTotal ?? rawParams.duration ?? rawParams.tiempo ?? 4
+          : 4;
+
+      const deviceIds =
+        typeof rawParams === 'object' && rawParams !== null
+          ? Array.isArray(rawParams.deviceIds)
+            ? rawParams.deviceIds
+            : Array.isArray(rawParams.devices)
+            ? rawParams.devices
+            : []
+          : [];
+
       const res = syscalls.createProcess(
         {
           name,
@@ -1101,60 +1166,84 @@ bootManager.executeBoot().then((res) => {
   }, [user, role]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ==========================================
-  // 11. DISPOSITIVOS VÍA SYSCALLS
+  // 11. DISPOSITIVOS VÍA SYSCALLS Y DRIVERS (HAL)
+  // Arquitectura: Proceso -> Syscall -> Driver -> Dispositivo -> Event Engine -> Supabase
+  // Ningún dispositivo se controla directamente desde React sin pasar por Syscall y Driver.
   // ==========================================
-  const toggleDevice = (id) => {
+  const executeDeviceAction = (id, action = 'TOGGLE', payload = {}) => {
     const t0 = performance.now();
     const d = devices.find((x) => x.id === id);
-    if (!d) return;
-
-    let nextStatus;
-    let extra = {};
-
-    switch (d.type) {
-      case 'light':
-        nextStatus = d.status === 'ON' ? 'OFF' : 'ON';
-        break;
-      case 'motion':
-        nextStatus = d.status === 'EN REPOSO' ? 'DETECTADO' : 'EN REPOSO';
-        break;
-      case 'camera':
-        nextStatus = d.status === 'ONLINE' ? 'OFFLINE' : 'ONLINE';
-        break;
-      case 'lock':
-        nextStatus = d.status === 'BLOQUEADA' ? 'DESBLOQUEADA' : 'BLOQUEADA';
-        break;
-      case 'climate': {
-        const nextTemp = d.temperature >= 24 ? 20.0 : +(d.temperature + 1.5).toFixed(1);
-        nextStatus = `${nextTemp} °C`;
-        extra = { temperature: nextTemp };
-        break;
-      }
-      default:
-        nextStatus = d.status === 'ON' ? 'OFF' : 'ON';
-    }
+    if (!d) return { success: false, reason: `Dispositivo con ID ${id} no encontrado` };
 
     try {
-      // Se pasa una copia para que el syscall no mute el estado de React directamente
-      syscalls.deviceWrite(id, nextStatus, [{ ...d }], authContext);
+      // Se ejecuta a través de la Syscall formal accessDevice hacia el Driver
+      const res = syscalls.accessDevice(
+        { deviceId: id, action, payload },
+        authContext,
+        devices,
+        processes
+      );
+
+      // Actualizar el estado del dispositivo en React
+      const updatedStatus = res.device.status;
+      const extra = res.device.temperature ? { temperature: res.device.temperature } : {};
+
+      setDevices((prev) =>
+        prev.map((x) => (x.id === id ? { ...x, status: updatedStatus, ...extra } : x))
+      );
+
+      // Alertas y bitácora contextual
+      if (res.eventType === 'SMOKE_DETECTED') {
+        addAlert({
+          title: 'Alerta de Incendio: Humo Detectado',
+          details: `Sensor de humo en ${d.zone} activado. Nivel: ${payload.ppm || 420} ppm.`,
+          severity: 'critical',
+        });
+      } else if (res.eventType === 'GAS_DETECTED') {
+        addAlert({
+          title: 'Alerta Crítica: Fuga de Gas Detectada',
+          details: `Sensor de gas en ${d.zone} activado. Nivel: ${payload.ppm || 680} ppm. Válvula de corte activada.`,
+          severity: 'critical',
+        });
+      } else if (res.eventType === 'DOORBELL_PRESSED') {
+        addLog({
+          level: 'INFO',
+          source: 'IOT_MANAGER',
+          message: `[TIMBRE PUERTA] Notificación de visita en Entrada. Captura registrada.`,
+        });
+        // Restablecer a IDLE tras 3 segundos
+        setTimeout(() => {
+          setDevices((prev) =>
+            prev.map((x) => (x.id === id ? { ...x, status: 'IDLE' } : x))
+          );
+        }, 3000);
+      }
+
+      addLog({
+        level: 'INFO',
+        source: 'IOT_MANAGER',
+        message: `sys_access_device [${res.driver}]: "${d.name}" (${d.zone}) -> ${updatedStatus} [Evento: ${res.eventType}].`,
+      });
+
+      measureLatency(t0);
+      return { success: true, ...res };
     } catch (err) {
       addAlert({
-        title: 'Operación Denegada',
+        title: 'Operación de Dispositivo Rechazada',
         details: err.message,
         severity: 'warning',
       });
-      return;
+      addLog({
+        level: 'WARN',
+        source: 'HARDWARE_BUS',
+        message: `[RECHAZO DRIVER] "${d.name}": ${err.message}`,
+      });
+      return { success: false, reason: err.message };
     }
+  };
 
-    setDevices((prev) => prev.map((x) => (x.id === id ? { ...x, status: nextStatus, ...extra } : x)));
-
-    addLog({
-      level: 'INFO',
-      source: 'IOT_MANAGER',
-      message: `sys_device_write: "${d.name}" conmutado a: ${nextStatus}.`,
-    });
-
-    measureLatency(t0);
+  const toggleDevice = (id) => {
+    return executeDeviceAction(id, 'TOGGLE');
   };
 
   // ==========================================
@@ -1343,10 +1432,13 @@ bootManager.executeBoot().then((res) => {
         setSimulationSpeed,
         compareSchedulers,
         createProcess,
+        sys_create_process: createProcess,
         executeProcess,
         pauseProcess,
         resumeProcess,
         terminateProcess,
+        sys_terminate_process: terminateProcess,
+        syscalls,
         freeMemoryBlock,
         configureVirtualPageSize,
         setVirtualMemoryAlgorithm,
@@ -1362,7 +1454,9 @@ bootManager.executeBoot().then((res) => {
         listVirtualDirectory: (path) => syscalls.listVirtualDirectory(path, authContext),
         processDeviceRelations: processManager.getDeviceRelations(),
         memoryHistory: memoryManager.getHistory(),
+        executeDeviceAction,
         toggleDevice,
+        driversTelemetry: syscalls.getDriversTelemetry(devices, processes),
         addLog,
         addAlert,
         resolveAlert,
@@ -1373,6 +1467,8 @@ bootManager.executeBoot().then((res) => {
         saludar,
         isSandboxMode: persistenceAdapterRef.current.isSandboxMode(),
         syncStatus,
+        syncMetrics,
+        supabaseAdapter: supabaseAdapterRef.current,
       }}
     >
       {children}

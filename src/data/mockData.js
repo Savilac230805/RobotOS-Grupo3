@@ -79,6 +79,32 @@ export const INITIAL_PROCESSES = [
     isSystem: true,
     description: 'Validación de seguros biométricos y cerrojos',
   },
+  {
+    id: 'p7',
+    pid: 107,
+    name: 'garbage_collector_daemon',
+    state: 'RUNNING',
+    priority: 'Media',
+    cpu: 4,
+    memoryBlocks: 2, // 32MB
+    memory: 32,
+    color: '#14B8A6',
+    isSystem: false,
+    description: 'Robot autónomo recolector y gestión de residuos',
+  },
+  {
+    id: 'p8',
+    pid: 108,
+    name: 'irrigation_daemon',
+    state: 'READY',
+    priority: 'Baja',
+    cpu: 2,
+    memoryBlocks: 2, // 32MB
+    memory: 32,
+    color: '#0284C7',
+    isSystem: false,
+    description: 'Control de aspersores y electroválvulas en jardín',
+  },
 ];
 
 export const INITIAL_MEMORY_BLOCKS = Array.from({ length: 64 }, (_, index) => {
@@ -110,7 +136,15 @@ export const INITIAL_MEMORY_BLOCKS = Array.from({ length: 64 }, (_, index) => {
   if (index >= 31 && index < 33) {
     return { id: index, state: 'ALLOCATED', processName: 'lock_guard', color: '#EC4899' };
   }
-  // Bloques 33-63: Libres (31 bloques)
+  // Bloques 33-34: garbage_collector_daemon (2 bloques)
+  if (index >= 33 && index < 35) {
+    return { id: index, state: 'ALLOCATED', processName: 'garbage_collector_daemon', color: '#14B8A6' };
+  }
+  // Bloques 35-36: irrigation_daemon (2 bloques)
+  if (index >= 35 && index < 37) {
+    return { id: index, state: 'ALLOCATED', processName: 'irrigation_daemon', color: '#0284C7' };
+  }
+  // Bloques 37-63: Libres (27 bloques)
   return { id: index, state: 'FREE', processName: null, color: '#1E293B' };
 });
 
@@ -196,6 +230,78 @@ export const INITIAL_DEVICES = [
     status: '22.5 °C',
     temperature: 22.5,
     isCommonArea: true,
+  },
+  {
+    id: 'd7',
+    name: 'Timbre Inteligente',
+    type: 'doorbell',
+    zone: 'Entrada',
+    status: 'IDLE',
+    isCommonArea: true,
+  },
+  {
+    id: 'd8',
+    name: 'Sensor de Humo Cocina',
+    type: 'smoke',
+    zone: 'Cocina',
+    status: 'NORMAL',
+    isCommonArea: true,
+  },
+  {
+    id: 'd9',
+    name: 'Sensor de Gas Cocina',
+    type: 'gas',
+    zone: 'Cocina',
+    status: 'NORMAL',
+    isCommonArea: true,
+  },
+  {
+    id: 'd10',
+    name: 'Robot Recolector de Basura',
+    type: 'garbage_collector',
+    zone: 'Salón',
+    status: 'ESTACIONADO',
+    isCommonArea: true,
+  },
+  {
+    id: 'd11',
+    name: 'Sistema de Riego Jardín',
+    type: 'irrigation',
+    zone: 'Jardín',
+    status: 'INACTIVO',
+    isCommonArea: false,
+  },
+  {
+    id: 'd12',
+    name: 'Cámara de Patio',
+    type: 'camera',
+    zone: 'Jardín',
+    status: 'ONLINE',
+    isCommonArea: false,
+  },
+  {
+    id: 'd13',
+    name: 'Luz de Jardín',
+    type: 'light',
+    zone: 'Jardín',
+    status: 'OFF',
+    isCommonArea: false,
+  },
+  {
+    id: 'd14',
+    name: 'Puerta de Garaje',
+    type: 'garage_door',
+    zone: 'Garaje',
+    status: 'CERRADA',
+    isCommonArea: false,
+  },
+  {
+    id: 'd15',
+    name: 'Luz Habitación Principal',
+    type: 'light',
+    zone: 'Habitación',
+    status: 'OFF',
+    isCommonArea: false,
   },
 ];
 

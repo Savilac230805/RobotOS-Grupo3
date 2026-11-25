@@ -1,10 +1,12 @@
 import React from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useSystem } from '../../context/SystemContext';
+import { useTheme, THEMES } from '../../context/ThemeContext';
 
 export const Navbar = ({ currentScreen, onNavigate }) => {
   const { user, role, switchRole, logout, checkPermission } = useAuth();
   const { metrics, activeAlertsCount, addLog } = useSystem();
+  const { theme, setTheme } = useTheme();
 
   const handleAlertClick = () => {
     if (checkPermission('USER', 'Acceso a Centro de Alertas desde la Barra Superior', addLog)) {
@@ -14,16 +16,15 @@ export const Navbar = ({ currentScreen, onNavigate }) => {
 
   const handleRoleChange = (newRole) => {
     switchRole(newRole);
-    // Si cambia a GUEST y está en una pantalla restringida, redirigir al Overview
-    if (newRole === 'GUEST' && (currentScreen === 'processes' || currentScreen === 'memory' || currentScreen === 'logs-alerts')) {
-      onNavigate('overview');
+    if (newRole === 'GUEST' && (currentScreen === 'processes' || currentScreen === 'memory' || currentScreen === 'logs-alerts' || currentScreen === 'user-audit')) {
+      onNavigate('dashboard');
     }
   };
 
   const hasActiveAlerts = activeAlertsCount > 0;
 
   return (
-    <header className="h-16 border-b border-slate-800 bg-slate-900/80 backdrop-blur-md px-6 flex items-center justify-between sticky top-0 z-30">
+    <header className="h-16 border-b border-slate-800 bg-slate-900/80 backdrop-blur-md px-6 flex items-center justify-between sticky top-0 z-30 select-none transition-colors duration-300">
       {/* Estado Vital del Robot: Cambia dinámicamente a EN ALERTA (rojo) si hay alertas activas */}
       <div className="flex items-center space-x-4">
         <div
@@ -53,7 +54,7 @@ export const Navbar = ({ currentScreen, onNavigate }) => {
           </span>
         </div>
 
-        {/* Telemetría Mini (solo visible si no es GUEST) */}
+        {/* Telemetría Mini */}
         {role !== 'GUEST' && (
           <div className="hidden md:flex items-center space-x-4 text-xs font-mono text-slate-400">
             <div className="flex items-center space-x-1.5">
@@ -68,8 +69,56 @@ export const Navbar = ({ currentScreen, onNavigate }) => {
         )}
       </div>
 
-      {/* Alertas, Selector de Rol y Perfil */}
-      <div className="flex items-center space-x-4">
+      {/* Selector de Tema, Alertas, Selector de Rol y Perfil */}
+      <div className="flex items-center space-x-3 sm:space-x-4">
+        {/* Selector de Temas Visuales (Fase 11H + Tema Acogedor) */}
+        <div className="flex items-center bg-slate-950/80 border border-slate-800 rounded-xl p-1 text-xs font-mono">
+          <button
+            onClick={() => setTheme(THEMES.WARM)}
+            title="Tema Acogedor: Base Beige con acentos Terracota y Coral"
+            className={`px-2 py-1 rounded-lg transition-all ${
+              theme === THEMES.WARM
+                ? 'bg-[#C85A32] text-white font-bold shadow'
+                : 'text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            🏡 Acogedor
+          </button>
+          <button
+            onClick={() => setTheme(THEMES.DARK)}
+            title="Modo Oscuro"
+            className={`px-2 py-1 rounded-lg transition-all ${
+              theme === THEMES.DARK
+                ? 'bg-slate-800 text-cyan-400 font-bold shadow'
+                : 'text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            🌙 Oscuro
+          </button>
+          <button
+            onClick={() => setTheme(THEMES.LIGHT)}
+            title="Modo Claro"
+            className={`px-2 py-1 rounded-lg transition-all ${
+              theme === THEMES.LIGHT
+                ? 'bg-slate-200 text-slate-900 font-bold shadow'
+                : 'text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            ☀️ Claro
+          </button>
+          <button
+            onClick={() => setTheme(THEMES.TECH)}
+            title="Modo Técnico (SOC/NOC Profesional)"
+            className={`px-2 py-1 rounded-lg transition-all ${
+              theme === THEMES.TECH
+                ? 'bg-emerald-950 text-emerald-400 font-bold border border-emerald-700 shadow'
+                : 'text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            📟 SOC/NOC
+          </button>
+        </div>
+
         {/* Badge de Alertas Activas */}
         <button
           onClick={handleAlertClick}
@@ -112,7 +161,10 @@ export const Navbar = ({ currentScreen, onNavigate }) => {
               <div className="text-[10px] text-slate-500 font-mono">{user.email}</div>
             </div>
             <button
-              onClick={logout}
+              onClick={async () => {
+                await logout();
+                onNavigate('login');
+              }}
               className="text-xs text-slate-400 hover:text-red-400 px-2.5 py-1.5 rounded-lg border border-slate-800 hover:border-red-900/50 bg-slate-800/40 transition-colors"
             >
               Salir

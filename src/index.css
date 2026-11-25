@@ -5,10 +5,11 @@
 @layer base {
   body {
     @apply bg-slate-950 text-slate-100 font-sans;
+    transition: background-color 0.3s ease, color 0.3s ease;
   }
 }
 
-/* Custom scrollbars for logs and tables */
+/* Custom scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -22,4 +23,131 @@
 }
 ::-webkit-scrollbar-thumb:hover {
   background: #475569;
+}
+
+/* ======================================================== */
+/* TEMA ACOGEDOR / WARM (Beige Cálido + Terracota & Coral)  */
+/* ======================================================== */
+.theme-warm {
+  --warm-bg-base: #FAF7F2;
+  --warm-bg-surface: #FFFFFF;
+  --warm-bg-card: #FFFDF9;
+  --warm-bg-elevated: #F4EDE4;
+  --warm-border: #E8DFD3;
+  --warm-border-strong: #D8CCC0;
+  --warm-text-primary: #2C231D;
+  --warm-text-secondary: #685A50;
+  --warm-text-muted: #8E7D72;
+  --warm-terracota: #C85A32;
+  --warm-terracota-hover: #B44D27;
+  --warm-coral: #E26D5C;
+  --warm-success: #2E7D32;
+  --warm-warning: #C77700;
+  --warm-error: #C53030;
+
+  background-color: var(--warm-bg-base) !important;
+  color: var(--warm-text-primary) !important;
+}
+
+/* Fondos y contenedores principales */
+.theme-warm .bg-slate-950,
+.theme-warm .bg-slate-950\/40,
+.theme-warm .bg-slate-950\/60,
+.theme-warm .bg-slate-950\/70,
+.theme-warm .bg-slate-950\/80,
+.theme-warm .bg-slate-950\/90 {
+  background-color: var(--warm-bg-base) !important;
+}
+
+.theme-warm .bg-slate-900,
+.theme-warm .bg-slate-900\/80,
+.theme-warm .bg-slate-900\/90 {
+  background-color: var(--warm-bg-surface) !important;
+  box-shadow: 0 1px 3px 0 rgba(44, 35, 29, 0.04), 0 1px 2px -1px rgba(44, 35, 29, 0.04);
+}
+
+.theme-warm .bg-slate-800,
+.theme-warm .bg-slate-800\/40,
+.theme-warm .bg-slate-800\/60,
+.theme-warm .bg-slate-800\/80 {
+  background-color: var(--warm-bg-elevated) !important;
+}
+
+/* Bordes cálidos */
+.theme-warm .border-slate-800,
+.theme-warm .border-slate-800\/80,
+.theme-warm .border-slate-800\/60,
+.theme-warm .border-slate-800\/50,
+.theme-warm .border-slate-700,
+.theme-warm .border-slate-700\/40,
+.theme-warm .border-slate-700\/50,
+.theme-warm .border-slate-900 {
+  border-color: var(--warm-border) !important;
+}
+
+/* Tipografía de alto contraste sobre fondo cálido */
+.theme-warm .text-white,
+.theme-warm .text-slate-100,
+.theme-warm .text-slate-200 {
+  color: var(--warm-text-primary) !important;
+}
+
+.theme-warm .text-slate-300,
+.theme-warm .text-slate-400 {
+  color: var(--warm-text-secondary) !important;
+}
+
+.theme-warm .text-slate-500,
+.theme-warm .text-slate-600 {
+  color: var(--warm-text-muted) !important;
+}
+
+/* Acentos Terracota y Coral */
+.theme-warm .text-cyan-400,
+.theme-warm .text-cyan-300 {
+  color: var(--warm-terracota) !important;
+}
+
+.theme-warm .bg-cyan-500\/10,
+.theme-warm .bg-cyan-500\/15,
+.theme-warm .bg-cyan-500\/20,
+.theme-warm .bg-cyan-950,
+.theme-warm .bg-cyan-950\/40,
+.theme-warm .bg-cyan-950\/60,
+.theme-warm .bg-cyan-950\/70,
+.theme-warm .bg-cyan-950\/80 {
+  background-color: #F8ECE7 !important;
+  border-color: #ECD1C5 !important;
+  color: var(--warm-terracota) !important;
+}
+
+.theme-warm .border-cyan-500,
+.theme-warm .border-cyan-500\/30,
+.theme-warm .border-cyan-500\/40,
+.theme-warm .border-cyan-800\/60,
+.theme-warm .border-cyan-800\/80 {
+  border-color: #E2B9A5 !important;
+}
+
+.theme-warm .bg-cyan-600,
+.theme-warm .from-cyan-600,
+.theme-warm .from-cyan-500 {
+  background-color: var(--warm-terracota) !important;
+}
+
+.theme-warm .hover\:from-cyan-400:hover,
+.theme-warm .hover\:from-cyan-500:hover,
+.theme-warm .hover\:bg-cyan-500:hover {
+  background-color: var(--warm-terracota-hover) !important;
+}
+
+/* Scrollbar en tema acogedor */
+.theme-warm ::-webkit-scrollbar-track {
+  background: #F4EDE4;
+}
+.theme-warm ::-webkit-scrollbar-thumb {
+  background: #D8CCC0;
+}
+.theme-warm ::-webkit-scrollbar-thumb:hover {
+  background: #C4B5A6;
 }

@@ -3,6 +3,7 @@ import { useSystem } from '../context/SystemContext';
 import { useAuth } from '../context/AuthContext';
 import { MetricCard } from '../components/overview/MetricCard';
 import { ResourceCharts } from '../components/overview/ResourceCharts';
+import { SyncDashboard } from '../components/overview/SyncDashboard';
 import { BOOT_STAGES } from '../core';
 
 export const OverviewPage = ({ onNavigate }) => {
@@ -497,6 +498,11 @@ export const OverviewPage = ({ onNavigate }) => {
           </div>
         )}
       </div>
+
+      {/* =========================================== */}
+      {/* PANEL DE SINCRONIZACIÓN — FASE 05           */}
+      {/* =========================================== */}
+      <SyncDashboard />
     </div>
   );
 };

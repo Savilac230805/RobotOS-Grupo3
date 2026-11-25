@@ -116,3 +116,21 @@ test('sin cliente: modo OFFLINE, el evento queda en memoria', async () => {
   assert.equal(history.length, 1);
   assert.equal(history[0].id, 'e5');
 });
+
+test('saveMetric persiste métricas CPU en kernel_events usando el esquema de eventos', async () => {
+  const client = fakeClient();
+  const a = new SupabasePersistenceAdapter(client);
+  await a.saveMetric({
+    algorithm: 'ROUND_ROBIN',
+    quantum: 4,
+    utilizacionCpu: 80,
+    timeline: [{ tick: 0, pid: 7 }],
+  });
+  await a.flush();
+  a.dispose();
+
+  const row = client.calls[0].rows[0];
+  assert.equal(row.type, 'CPU_METRICS_RECORDED');
+  assert.equal(row.source, 'SCHEDULER');
+  assert.deepEqual(row.payload.timeline, [{ tick: 0, pid: 7 }]);
+});

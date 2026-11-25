@@ -6,67 +6,134 @@ export const Sidebar = ({ currentScreen, onNavigate }) => {
   const { role, checkPermission } = useAuth();
   const { activeAlertsCount, addLog } = useSystem();
 
-  const menuItems = [
+  // Secciones requeridas por Fase 11C
+  const sections = [
     {
-      id: 'overview',
-      name: 'Centro de Control',
-      subtitle: 'Telemetría y KPIs',
-      minRole: 'GUEST',
-      icon: (
-        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-        </svg>
-      ),
+      title: 'SECCIÓN USUARIO',
+      items: [
+        {
+          id: 'dashboard',
+          name: '📈 Estado General',
+          subtitle: 'KPIs y Métricas SaaS',
+          minRole: 'GUEST',
+        },
+        {
+          id: 'devices',
+          name: '🏠 Mi Casa',
+          subtitle: 'Digital Twin 2D',
+          minRole: 'GUEST',
+        },
+        {
+          id: 'overview',
+          name: '💡 Dispositivos',
+          subtitle: 'Sensores & Actuadores',
+          minRole: 'GUEST',
+        },
+        {
+          id: 'desktop',
+          name: '🖥️ Escritorio RobotOS',
+          subtitle: 'Entorno de Ventanas',
+          minRole: 'GUEST',
+        },
+        {
+          id: 'settings',
+          name: '⚙ Automatizaciones',
+          subtitle: 'Reglas y Políticas',
+          minRole: 'USER',
+        },
+        {
+          id: 'login',
+          name: '👤 Perfil & Sesión',
+          subtitle: 'Control de Roles RBAC',
+          minRole: 'GUEST',
+        },
+      ],
     },
     {
-      id: 'processes',
-      name: 'Procesos & Scheduler',
-      subtitle: 'Gantt y Estados',
-      minRole: 'USER', // GUEST no puede entrar
-      icon: (
-        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
-        </svg>
-      ),
+      title: 'SECCIÓN SISTEMA',
+      items: [
+        {
+          id: 'processes',
+          name: 'Procesos',
+          subtitle: 'Gantt & Estados PCB',
+          minRole: 'USER',
+        },
+        {
+          id: 'resource-monitor',
+          name: 'Scheduler & CPU',
+          subtitle: 'Planificador y Ticks',
+          minRole: 'USER',
+        },
+        {
+          id: 'memory',
+          name: 'Memoria & Paginación',
+          subtitle: 'Física y Virtual',
+          minRole: 'USER',
+        },
+        {
+          id: 'concurrency-lab',
+          name: 'IPC & Concurrencia',
+          subtitle: 'Mutex, Semáforos & RAG',
+          minRole: 'USER',
+        },
+        {
+          id: 'terminal',
+          name: 'Terminal RobotOS',
+          subtitle: 'Shell & Syscalls',
+          minRole: 'USER',
+        },
+      ],
     },
     {
-      id: 'memory',
-      name: 'Memoria & Archivos',
-      subtitle: 'Bloques y VFS',
-      minRole: 'USER', // GUEST no puede entrar
-      icon: (
-        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-        </svg>
-      ),
+      title: 'SECCIÓN DIAGNÓSTICO',
+      items: [
+        {
+          id: 'diagnostics',
+          name: 'Diagnóstico & Faults',
+          subtitle: 'Fault Engine & Asistente',
+          minRole: 'USER',
+        },
+        {
+          id: 'benchmark',
+          name: 'Benchmark Center',
+          subtitle: 'Evaluación Comparativa',
+          minRole: 'USER',
+        },
+      ],
     },
     {
-      id: 'devices',
-      name: 'Dispositivos Domóticos',
-      subtitle: 'Sensores y Actuadores',
-      minRole: 'GUEST',
-      icon: (
-        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-        </svg>
-      ),
-    },
-    {
-      id: 'logs-alerts',
-      name: 'Logs, Alertas & Test',
-      subtitle: 'Diagnóstico y Sandbox',
-      minRole: 'USER', // GUEST no puede entrar
-      badge: role !== 'GUEST' && activeAlertsCount > 0 ? activeAlertsCount : null,
-      icon: (
-        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-        </svg>
-      ),
+      title: 'SECCIÓN ADMINISTRACIÓN',
+      items: [
+        {
+          id: 'user-audit',
+          name: 'Auditoría de Usuario',
+          subtitle: 'Timeline de Interfaz',
+          minRole: 'ADMIN', // Exclusivo ADMIN
+        },
+        {
+          id: 'observability',
+          name: 'Observabilidad',
+          subtitle: 'Live Stream de Eventos',
+          minRole: 'USER',
+        },
+        {
+          id: 'logs-alerts',
+          name: 'Logs & Alertas',
+          subtitle: 'Diagnóstico y Sandbox',
+          minRole: 'USER',
+          badge: role !== 'GUEST' && activeAlertsCount > 0 ? activeAlertsCount : null,
+        },
+        {
+          id: 'file-explorer',
+          name: 'Explorador de Archivos',
+          subtitle: 'Virtual File System',
+          minRole: 'USER',
+        },
+      ],
     },
   ];
 
   const handleItemClick = (item) => {
-    // Si la pantalla requiere rol superior a GUEST, evaluar checkPermission
     if (item.minRole !== 'GUEST') {
       const allowed = checkPermission(item.minRole, `Navegación al módulo "${item.name}"`, addLog);
       if (!allowed) return;
@@ -75,10 +142,13 @@ export const Sidebar = ({ currentScreen, onNavigate }) => {
   };
 
   return (
-    <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between h-screen sticky top-0 shrink-0">
-      <div>
+    <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between h-screen sticky top-0 shrink-0 select-none">
+      <div className="overflow-y-auto flex-1">
         {/* Brand Header */}
-        <div className="h-16 px-6 flex items-center space-x-3 border-b border-slate-800 bg-slate-950/40">
+        <div
+          onClick={() => onNavigate('welcome')}
+          className="h-16 px-5 flex items-center space-x-3 border-b border-slate-800 bg-slate-950/60 cursor-pointer hover:bg-slate-900 transition-colors"
+        >
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white font-black text-sm shadow-lg shadow-cyan-500/20">
             R
           </div>
@@ -89,83 +159,78 @@ export const Sidebar = ({ currentScreen, onNavigate }) => {
                 v2.4
               </span>
             </h1>
-            <p className="text-[11px] text-slate-400">SmartHome OS Prototype</p>
+            <p className="text-[10px] text-slate-400">SmartHome OS</p>
           </div>
         </div>
 
-        {/* Navigation Items */}
-        <nav className="p-3 space-y-1">
-          <div className="px-3 py-2 text-[10px] font-mono uppercase tracking-wider text-slate-500 font-semibold">
-            Subsistemas del Robot
-          </div>
-
-          {menuItems.map((item) => {
-            const isActive = currentScreen === item.id;
-            const isBlockedForGuest = role === 'GUEST' && item.minRole !== 'GUEST';
-
-            return (
-              <button
-                key={item.id}
-                onClick={() => handleItemClick(item)}
-                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left transition-all group ${
-                  isActive
-                    ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 shadow-sm'
-                    : isBlockedForGuest
-                    ? 'text-slate-600 hover:text-slate-400 hover:bg-slate-800/30 border border-transparent opacity-75'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent'
-                }`}
-              >
-                <div className="flex items-center space-x-3">
-                  <span className={`${isActive ? 'text-cyan-400' : 'text-slate-500 group-hover:text-slate-300'}`}>
-                    {item.icon}
-                  </span>
-                  <div>
-                    <div className="flex items-center space-x-1.5">
-                      <span className="text-xs font-semibold">{item.name}</span>
-                      {isBlockedForGuest && <span className="text-[10px]">🔒</span>}
-                    </div>
-                    <div className="text-[10px] text-slate-500">{item.subtitle}</div>
-                  </div>
-                </div>
-
-                {item.badge && (
-                  <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-red-500/20 text-red-400 border border-red-500/30">
-                    {item.badge}
-                  </span>
+        {/* Navigation Sections */}
+        <nav className="p-3 space-y-4">
+          {sections.map((sec) => (
+            <div key={sec.title} className="space-y-1">
+              <div className="px-3 py-1 text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold flex items-center justify-between">
+                <span>{sec.title}</span>
+                {sec.title === 'SECCIÓN ADMINISTRACIÓN' && role !== 'ADMIN' && (
+                  <span className="text-[9px] text-purple-400 font-mono">ADMIN</span>
                 )}
-              </button>
-            );
-          })}
+              </div>
+
+              {sec.items.map((item) => {
+                const isActive = currentScreen === item.id;
+                const isBlocked = (item.minRole === 'ADMIN' && role !== 'ADMIN') ||
+                                  (item.minRole === 'USER' && role === 'GUEST');
+
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => handleItemClick(item)}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all group ${
+                      isActive
+                        ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                        : isBlocked
+                        ? 'text-slate-600 hover:text-slate-400 hover:bg-slate-800/30 border border-transparent opacity-75'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-800/60 border border-transparent'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2.5 min-w-0">
+                      <div className="truncate">
+                        <div className="flex items-center space-x-1.5">
+                          <span className="text-xs font-semibold truncate">{item.name}</span>
+                          {isBlocked && <span className="text-[10px]">🔒</span>}
+                        </div>
+                        <div className="text-[10px] text-slate-500 truncate">{item.subtitle}</div>
+                      </div>
+                    </div>
+
+                    {item.badge && (
+                      <span className="px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-red-500/20 text-red-400 border border-red-500/30 shrink-0">
+                        {item.badge}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </nav>
       </div>
 
-      {/* Footer / Login Link & RBAC Indicator */}
-      <div className="p-3 border-t border-slate-800 bg-slate-950/40">
-        <button
-          onClick={() => onNavigate('login')}
-          className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-left transition-all ${
-            currentScreen === 'login'
-              ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/30'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-          }`}
-        >
-          <svg className="w-5 h-5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
-          </svg>
-          <div>
-            <div className="text-xs font-semibold">Autenticación</div>
-            <div className="text-[10px] text-slate-500">Supabase Auth & Roles</div>
-          </div>
-        </button>
-
-        <div className="mt-3 px-3 py-2 rounded-lg bg-slate-950 border border-slate-800/80 flex items-center justify-between text-[11px]">
-          <span className="text-slate-500">Rol activo:</span>
+      {/* Footer / User Profile & Role Indicator */}
+      <div className="p-3 border-t border-slate-800 bg-slate-950/60 shrink-0 space-y-2">
+        <div className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800/80 flex items-center justify-between text-[11px]">
+          <span className="text-slate-500 font-mono">Rol Activo:</span>
           <span className={`font-mono font-bold ${
-            role === 'ADMIN' ? 'text-purple-400' : role === 'USER' ? 'text-blue-400' : 'text-amber-400'
+            role === 'ADMIN' ? 'text-purple-400' : role === 'USER' ? 'text-cyan-400' : 'text-amber-400'
           }`}>
             {role}
           </span>
         </div>
+
+        <button
+          onClick={() => onNavigate('welcome')}
+          className="w-full text-center py-1.5 text-[11px] font-mono text-slate-400 hover:text-cyan-400 transition-colors"
+        >
+          ℹ️ Ver Pantalla de Bienvenida
+        </button>
       </div>
     </aside>
   );

@@ -1,47 +1,64 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
-import { inMemoryAdapter } from '../core';
+import { inMemoryAdapter, eventEngine, EVENT_SOURCES, EVENT_SEVERITY } from '../core';
+import { findDemoUser, DEMO_USERS } from '../config/demoUsers';
 
 const AuthContext = createContext();
 
-const ROLE_LEVELS = {
+export const ROLE_LEVELS = {
   ADMIN: 3,
   USER: 2,
   GUEST: 1,
 };
 
-// ==========================================
-// CUENTAS DE LABORATORIO
-// Solo se habilitan en desarrollo (npm run dev) o si se define
-// VITE_ENABLE_LAB_ACCOUNTS=true. NO son seguridad real: cualquier valor que viaje
-// en el frontend es visible. La protección real de los datos compartidos
-// la imponen las políticas RLS de Supabase (is_admin()).
-// ==========================================
-const LAB_ACCOUNTS_ENABLED =
-  import.meta.env.DEV || import.meta.env.VITE_ENABLE_LAB_ACCOUNTS === 'true';
-
-const LAB_PASSWORD = import.meta.env.VITE_LAB_PASSWORD || 'robotos-lab';
-
-const LAB_ACCOUNTS = {
-  'admin@robotos.local': { role: 'ADMIN', name: 'Operador Admin' },
-  'residente@robotos.local': { role: 'USER', name: 'Residente Hogar' },
-  'invitado@robotos.local': { role: 'GUEST', name: 'Invitado Temporal' },
-};
-
-// Visitante público: entra sin cuenta, lee todo y opera su propia simulación local (sandbox).
-const VISITOR_USER = {
-  id: 'usr_visitor',
-  email: 'visitante@robotos.local',
-  name: 'Visitante',
-  role: 'USER',
-  isVisitor: true,
-};
+const SESSION_STORAGE_KEY = 'robotos_session';
+const LOCKOUT_THRESHOLD = 3;
+const LOCKOUT_DURATION_MS = 30000; // 30 segundos de bloqueo tras 3 intentos fallidos
 
 export const AuthProvider = ({ children }) => {
-  const [user, setUser] = useState(VISITOR_USER);
+  // Inicializar sesión desde sessionStorage
+  const [user, setUser] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.role && ROLE_LEVELS[parsed.role]) {
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.warn('[AuthContext] Error al leer sessionStorage:', e);
+    }
+    return null; // Inicialmente sin sesión
+  });
 
   const [authError, setAuthError] = useState(null);
   const [deniedModal, setDeniedModal] = useState(null); // { title, action, reason }
+  
+  // Control de intentos fallidos y bloqueo temporal
+  const [failedAttempts, setFailedAttempts] = useState(0);
+  const [lockoutUntil, setLockoutUntil] = useState(null);
+  const [lockoutSecondsLeft, setLockoutSecondsLeft] = useState(0);
+
+  // Temporizador de cuenta regresiva para el bloqueo
+  useEffect(() => {
+    if (!lockoutUntil) {
+      setLockoutSecondsLeft(0);
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((lockoutUntil - Date.now()) / 1000));
+      setLockoutSecondsLeft(remaining);
+      if (remaining <= 0) {
+        setLockoutUntil(null);
+        setFailedAttempts(0);
+        setAuthError(null);
+      }
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, [lockoutUntil]);
 
   // Sincronizar modo Sandbox de persistencia según el rol activo
   // Visitantes y usuarios no admin: sandbox local (no tocan almacenamiento compartido)
@@ -51,108 +68,250 @@ export const AuthProvider = ({ children }) => {
     inMemoryAdapter.setSandboxMode(!isAdmin);
   }, [user]);
 
-  // Cambiar rol rápidamente para pruebas de laboratorio.
-  // Solo disponible cuando las cuentas de laboratorio están habilitadas.
-  const switchRole = (newRole) => {
-    if (!LAB_ACCOUNTS_ENABLED) return;
+  // Guardar o eliminar sesión en sessionStorage
+  useEffect(() => {
+    try {
+      if (user) {
+        sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(user));
+      } else {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      }
+    } catch (e) {
+      console.warn('[AuthContext] Error al sincronizar sessionStorage:', e);
+    }
+  }, [user]);
+
+  // Cambiar rol rápidamente para pruebas o laboratorio
+  const switchRole = useCallback((newRole) => {
     if (!ROLE_LEVELS[newRole]) return;
 
-    setUser((prev) => ({
-      ...prev,
-      role: newRole,
-      isVisitor: false,
+    const updatedUser = {
+      id: user?.id || `usr_${newRole.toLowerCase()}`,
+      email: `${newRole.toLowerCase()}@robotos.local`,
       name:
         newRole === 'ADMIN'
-          ? 'Operador Admin'
+          ? 'Administrador del Sistema'
           : newRole === 'USER'
-          ? 'Residente Hogar'
+          ? 'Operador / Residente'
           : 'Invitado Temporal',
-      email: `${newRole.toLowerCase()}@robotos.local`,
-    }));
-  };
+      role: newRole,
+      isVisitor: newRole === 'GUEST',
+    };
 
-  const tryLabLogin = (email, password) => {
-    if (!LAB_ACCOUNTS_ENABLED) return false;
-    const account = LAB_ACCOUNTS[email];
-    if (!account || password !== LAB_PASSWORD) return false;
-
-    setUser({
-      id: `lab_${account.role.toLowerCase()}`,
-      email,
-      name: account.name,
-      role: account.role,
-      isVisitor: false,
-    });
-    return true;
-  };
-
-  // Login: solo ADMIN (y usuarios registrados) necesitan autenticarse.
-  const login = async (email, password) => {
-    setAuthError(null);
-    const cleanEmail = String(email || '').trim().toLowerCase();
+    setUser(updatedUser);
 
     try {
+      eventEngine.emit({
+        type: 'ROLE_SWITCHED',
+        source: EVENT_SOURCES.SECURITY_GUARD,
+        severity: EVENT_SEVERITY.INFO,
+        payload: { newRole, user: updatedUser.email },
+      });
+    } catch (e) {}
+  }, [user]);
+
+  // Login con credenciales demo o Supabase Auth
+  const login = async (usernameOrEmail, password) => {
+    setAuthError(null);
+
+    // Verificar si el sistema está bloqueado por intentos fallidos
+    if (lockoutUntil && Date.now() < lockoutUntil) {
+      const waitSec = Math.ceil((lockoutUntil - Date.now()) / 1000);
+      const msg = `Acceso bloqueado temporalmente por seguridad. Espere ${waitSec} segundos.`;
+      setAuthError(msg);
+      return { success: false, error: msg, locked: true, secondsLeft: waitSec };
+    }
+
+    const cleanInput = String(usernameOrEmail || '').trim();
+    const cleanLower = cleanInput.toLowerCase();
+
+    // 1. Intentar con credenciales demo aisladas (demoUsers.js)
+    const demoUser = findDemoUser(cleanLower, password);
+    if (demoUser) {
+      const loggedUser = {
+        id: `usr_${demoUser.role.toLowerCase()}`,
+        email: demoUser.email,
+        name: demoUser.name,
+        role: demoUser.role,
+        isVisitor: demoUser.role === 'GUEST',
+      };
+
+      setUser(loggedUser);
+      setFailedAttempts(0);
+      setLockoutUntil(null);
+
+      try {
+        eventEngine.emit({
+          type: 'LOGIN_SUCCESS',
+          source: EVENT_SOURCES.SECURITY_GUARD,
+          severity: EVENT_SEVERITY.INFO,
+          payload: {
+            user: loggedUser.email,
+            role: loggedUser.role,
+            authMethod: 'DEMO_CREDENTIALS',
+          },
+        });
+      } catch (e) {}
+
+      return { success: true, user: loggedUser };
+    }
+
+    // 2. Intentar Supabase Auth si está configurado
+    try {
       const { data, error } = await supabase.auth.signInWithPassword({
-        email: cleanEmail,
+        email: cleanLower,
         password,
       });
 
       if (!error && data?.user) {
-        // El rol debe venir de app_metadata (lo asigna el servidor), no de user_metadata,
-        // que el propio usuario puede editar. La fuente definitiva será la tabla user_roles
-        // consultada con is_admin() y reforzada por RLS.
         const metaRole = data.user.app_metadata?.role;
         const assignedRole = ROLE_LEVELS[metaRole] ? metaRole : 'USER';
-        setUser({
+        const loggedUser = {
           id: data.user.id,
           email: data.user.email,
-          name: data.user.user_metadata?.name || cleanEmail.split('@')[0],
+          name: data.user.user_metadata?.name || cleanLower.split('@')[0],
           role: assignedRole,
           isVisitor: false,
-        });
-        return { success: true };
+        };
+
+        setUser(loggedUser);
+        setFailedAttempts(0);
+        setLockoutUntil(null);
+
+        try {
+          eventEngine.emit({
+            type: 'LOGIN_SUCCESS',
+            source: EVENT_SOURCES.SECURITY_GUARD,
+            severity: EVENT_SEVERITY.INFO,
+            payload: {
+              user: loggedUser.email,
+              role: loggedUser.role,
+              authMethod: 'SUPABASE_AUTH',
+            },
+          });
+        } catch (e) {}
+
+        return { success: true, user: loggedUser };
       }
     } catch (err) {
-      // Sin conexión o Supabase sin configurar: se intenta con las cuentas de laboratorio.
+      // Ignorar error de red si no hay Supabase
     }
 
-    if (tryLabLogin(cleanEmail, password)) {
-      return { success: true };
+    // Si falló la autenticación: registrar intento fallido
+    const nextAttempts = failedAttempts + 1;
+    setFailedAttempts(nextAttempts);
+
+    try {
+      eventEngine.emit({
+        type: 'LOGIN_FAILED',
+        source: EVENT_SOURCES.SECURITY_GUARD,
+        severity: EVENT_SEVERITY.WARN,
+        payload: {
+          attemptedUser: cleanInput,
+          attemptNumber: nextAttempts,
+          maxAttempts: LOCKOUT_THRESHOLD,
+        },
+      });
+    } catch (e) {}
+
+    if (nextAttempts >= LOCKOUT_THRESHOLD) {
+      const lockoutTime = Date.now() + LOCKOUT_DURATION_MS;
+      setLockoutUntil(lockoutTime);
+      setLockoutSecondsLeft(30);
+      const msg = `Demasiados intentos fallidos (3/3). Acceso bloqueado por 30 segundos.`;
+      setAuthError(msg);
+      return { success: false, error: msg, locked: true, secondsLeft: 30 };
     }
 
-    const message = LAB_ACCOUNTS_ENABLED
-      ? 'Credenciales inválidas. En modo laboratorio use admin@robotos.local con la contraseña de laboratorio.'
-      : 'Credenciales inválidas.';
-    setAuthError(message);
-    return { success: false, error: message };
+    const remaining = LOCKOUT_THRESHOLD - nextAttempts;
+    const msg = `Credenciales inválidas. Te quedan ${remaining} ${remaining === 1 ? 'intento' : 'intentos'} antes del bloqueo temporal.`;
+    setAuthError(msg);
+    return { success: false, error: msg, remainingAttempts: remaining };
   };
 
+  // Acceso rápido como invitado (GUEST)
+  const loginAsGuest = useCallback(() => {
+    const guestUser = {
+      id: 'usr_guest',
+      email: 'guest@robotos.local',
+      name: 'Invitado Temporal',
+      role: 'GUEST',
+      isVisitor: true,
+    };
+
+    setUser(guestUser);
+    setFailedAttempts(0);
+    setLockoutUntil(null);
+
+    try {
+      eventEngine.emit({
+        type: 'LOGIN_SUCCESS',
+        source: EVENT_SOURCES.SECURITY_GUARD,
+        severity: EVENT_SEVERITY.INFO,
+        payload: {
+          user: guestUser.email,
+          role: 'GUEST',
+          authMethod: 'QUICK_GUEST_ACCESS',
+        },
+      });
+    } catch (e) {}
+
+    return guestUser;
+  }, []);
+
+  // Cierre de sesión
   const logout = async () => {
+    const previousEmail = user?.email || 'Desconocido';
+    const previousRole = user?.role || 'GUEST';
+
     try {
       await supabase.auth.signOut();
-    } catch (e) {
-      // Ignorar error si no está configurado Supabase
-    }
-    // Al cerrar sesión se vuelve al modo Visitante (lectura total + sandbox local)
-    setUser(VISITOR_USER);
+    } catch (e) {}
+
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    setUser(null);
+
+    try {
+      eventEngine.emit({
+        type: 'LOGOUT',
+        source: EVENT_SOURCES.SECURITY_GUARD,
+        severity: EVENT_SEVERITY.INFO,
+        payload: { user: previousEmail, role: previousRole },
+      });
+    } catch (e) {}
   };
 
   /**
    * Valida si el usuario actual cumple con el rol mínimo necesario.
    * Si no tiene permiso, muestra alerta de ACCESO DENEGADO y devuelve false.
    */
-  const checkPermission = (requiredRole, actionDescription, logActionCallback) => {
+  const checkPermission = useCallback((requiredRole, actionDescription, logActionCallback) => {
     const currentLevel = user ? ROLE_LEVELS[user.role] || 0 : 0;
     const requiredLevel = ROLE_LEVELS[requiredRole] || 1;
 
     if (currentLevel < requiredLevel) {
-      const reason = `El rol actual (${user ? user.role : 'ANÓNIMO'}) no tiene permisos para "${actionDescription}". Se requiere rol ${requiredRole}.`;
+      const reason = `El rol actual (${user ? user.role : 'SIN SESIÓN'}) no tiene permisos para "${actionDescription}". Se requiere rol ${requiredRole}.`;
 
       setDeniedModal({
         title: 'ACCESO DENEGADO',
         action: actionDescription,
         reason: reason,
       });
+
+      try {
+        eventEngine.emit({
+          type: 'ACCESS_DENIED',
+          source: EVENT_SOURCES.SECURITY_GUARD,
+          severity: EVENT_SEVERITY.WARN,
+          payload: {
+            user: user?.email || 'Anónimo',
+            currentRole: user?.role || 'NONE',
+            requiredRole,
+            action: actionDescription,
+            reason,
+          },
+        });
+      } catch (e) {}
 
       if (logActionCallback) {
         logActionCallback({
@@ -166,7 +325,7 @@ export const AuthProvider = ({ children }) => {
     }
 
     return true;
-  };
+  }, [user]);
 
   const closeDeniedModal = () => setDeniedModal(null);
 
@@ -175,13 +334,16 @@ export const AuthProvider = ({ children }) => {
       value={{
         user,
         role: user?.role || 'GUEST',
-        isVisitor: !!user?.isVisitor,
-        isAuthenticated: !!user && !user.isVisitor && user.role !== 'GUEST',
+        isVisitor: !user || !!user?.isVisitor || user?.role === 'GUEST',
+        isAuthenticated: !!user,
         isSandbox: user?.role !== 'ADMIN',
-        labAccountsEnabled: LAB_ACCOUNTS_ENABLED,
-        switchRole,
+        lockoutSecondsLeft,
+        isLocked: !!lockoutUntil && lockoutSecondsLeft > 0,
+        failedAttempts,
         login,
+        loginAsGuest,
         logout,
+        switchRole,
         checkPermission,
         deniedModal,
         closeDeniedModal,
